@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ArrowUp, Loader2, MessagesSquare, Rocket, Settings, Sparkles, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -85,6 +85,63 @@ function UpdateCenter({ running }: { running: boolean | undefined }) {
   );
 }
 
+/**
+ * 顶部平台标签页定义:一级平台域切换(Qoder / 灵犀为预留位,接入后补路由与页面即可)。
+ * traeOnly:仅 Windows 或 webui 可用(与 TRAE 侧栏项可见性一致);comingSoon:置灰预留。
+ */
+type PlatformTab = "workbuddy" | "trae" | "qoder" | "lingxi";
+
+const PLATFORM_TABS: {
+  platform: PlatformTab;
+  label: string;
+  path: string;
+  /** 仅 Windows 或 webui 可用(与 TRAE 侧栏项可见性一致) */
+  traeOnly?: boolean;
+  /** 置灰预留位 */
+  comingSoon?: boolean;
+}[] = [
+  { platform: "workbuddy", label: "WorkBuddy", path: "/" },
+  { platform: "trae", label: "TRAE", path: "/trae", traeOnly: true },
+  { platform: "qoder", label: "Qoder", path: "/qoder", comingSoon: true },
+  { platform: "lingxi", label: "灵犀", path: "/lingxi", comingSoon: true },
+];
+
+function PlatformTabs({ current, traeEnabled }: { current: PlatformTab; traeEnabled: boolean }) {
+  const navigate = useNavigate();
+  return (
+    <div
+      className="mb-3 grid grid-cols-2 gap-1 rounded-lg bg-foreground/[0.04] p-1"
+      role="tablist"
+      aria-label="平台切换"
+    >
+      {PLATFORM_TABS.map((tab) => {
+        const disabled = tab.comingSoon === true || (tab.traeOnly === true && !traeEnabled);
+        const active = current === tab.platform;
+        return (
+          <button
+            key={tab.platform}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            disabled={disabled}
+            title={tab.comingSoon ? "即将上线" : undefined}
+            onClick={() => navigate(tab.path)}
+            className={cn(
+              "rounded-md px-2 py-1.5 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+              active
+                ? "bg-background font-medium text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+              disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
+            )}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function Layout() {
   const running = useAccountsStore((s) => s.status?.running);
   const hasUnifiedTitleBar =
@@ -99,6 +156,10 @@ function Layout() {
    */
   const showTraeNav =
     !demoModeEnabled && (!api.isDesktop() || navigator.userAgent.includes("Windows"));
+
+  // 当前平台域由路由推导:/trae* 属 TRAE 域,其余(含 /settings)属 WorkBuddy 域
+  const { pathname } = useLocation();
+  const platform: PlatformTab = pathname.startsWith("/trae") ? "trae" : "workbuddy";
 
   return (
     <div className="flex h-screen min-h-0 overflow-hidden bg-background">
@@ -134,38 +195,42 @@ function Layout() {
             )}
           </div>
         </div>
+        <PlatformTabs current={platform} traeEnabled={showTraeNav} />
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5" aria-label="主导航">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                isActive
-                  ? "bg-foreground/[0.06] font-medium text-foreground"
-                  : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-              )
-            }
-          >
-            <User className="size-4" />
-            账号管理
-          </NavLink>
-          <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
-          <NavLink
-            to="/credit-stats"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                isActive
-                  ? "bg-foreground/[0.06] font-medium text-foreground"
-                  : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-              )
-            }
-          >
-            <Sparkles className="size-4" />
-            积分统计
-          </NavLink>
-          {showTraeNav && (
+          {platform === "workbuddy" ? (
+            <>
+              <NavLink
+                to="/"
+                end
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    isActive
+                      ? "bg-foreground/[0.06] font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                  )
+                }
+              >
+                <User className="size-4" />
+                账号管理
+              </NavLink>
+              <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
+              <NavLink
+                to="/credit-stats"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    isActive
+                      ? "bg-foreground/[0.06] font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                  )
+                }
+              >
+                <Sparkles className="size-4" />
+                积分统计
+              </NavLink>
+            </>
+          ) : (
             <>
               <NavLink
                 to="/trae"
@@ -180,19 +245,20 @@ function Layout() {
                 }
               >
                 <Rocket className="size-4" />
-                TRAE
+                账号管理
               </NavLink>
               <NavLink
                 to="/trae/credits"
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-2.5 rounded-lg pl-[38px] text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
                     isActive
                       ? "bg-foreground/[0.06] font-medium text-foreground"
                       : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
                   )
                 }
               >
+                <Sparkles className="size-4" />
                 TRAE 积分
               </NavLink>
             </>
