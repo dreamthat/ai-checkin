@@ -23,6 +23,10 @@ fn default_port() -> u16 {
 /// 签到时间段时固定 30 分钟）；自动轮换按配置间隔执行；
 /// 限额 hook 信号每秒轮询一次、启动时后台默认接入。
 fn spawn_background_loops() {
+    // TRAE 子系统初始化:数据目录 + 旧 TraeMate 数据静默迁移 + 定时签到循环
+    // (调度循环在 api.rs,与 webui 路由共用 TraeState/reqwest Client)
+    api::init_trae();
+
     tokio::spawn(async move {
         if let Err(error) = config::compact_checkin_logs() {
             eprintln!("[签到] 历史日志整理失败: {error}");

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes } from "react-router-dom";
-import { ArrowUp, Loader2, MessagesSquare, Settings, Sparkles, User } from "lucide-react";
+import { ArrowUp, Loader2, MessagesSquare, Rocket, Settings, Sparkles, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
@@ -8,6 +8,8 @@ import AccountsPage from "@/pages/AccountsPage";
 import CreditStatsPage from "@/pages/CreditStatsPage";
 import TokenStatsPage from "@/pages/TokenStatsPage";
 import SettingsPage from "@/pages/SettingsPage";
+import TraeAccountsPage from "@/pages/TraeAccountsPage";
+import TraeCreditsPage from "@/pages/TraeCreditsPage";
 import { StatusDot, AppIconMark } from "@/components/product-marks";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -91,6 +93,13 @@ function Layout() {
   useWorkbuddyStatusRefresh();
   useRotateDeferredNotice();
 
+  /**
+   * TRAE 侧栏项可见性：webui（服务端模式）始终显示；桌面端仅 Windows 显示
+   * （TRAE 数据目录 / DPAPI / 多开依赖 Windows）；演示模式隐藏。
+   */
+  const showTraeNav =
+    !demoModeEnabled && (!api.isDesktop() || navigator.userAgent.includes("Windows"));
+
   return (
     <div className="flex h-screen min-h-0 overflow-hidden bg-background">
       {hasUnifiedTitleBar ? (
@@ -156,6 +165,38 @@ function Layout() {
             <Sparkles className="size-4" />
             积分统计
           </NavLink>
+          {showTraeNav && (
+            <>
+              <NavLink
+                to="/trae"
+                end
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    isActive
+                      ? "bg-foreground/[0.06] font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                  )
+                }
+              >
+                <Rocket className="size-4" />
+                TRAE
+              </NavLink>
+              <NavLink
+                to="/trae/credits"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2.5 rounded-lg pl-[38px] text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+                    isActive
+                      ? "bg-foreground/[0.06] font-medium text-foreground"
+                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+                  )
+                }
+              >
+                TRAE 积分
+              </NavLink>
+            </>
+          )}
           <NavLink
             to="/settings"
             className={({ isActive }) =>
@@ -196,6 +237,8 @@ export default function App() {
             <Route path="/" element={<AccountsPage />} />
             <Route path="/credit-stats" element={<CreditStatsPage />} />
             <Route path="/token-stats" element={<TokenStatsPage />} />
+            <Route path="/trae" element={<TraeAccountsPage />} />
+            <Route path="/trae/credits" element={<TraeCreditsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

@@ -63,6 +63,8 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
             "update-restart" => start_update_restart(app),
             "lightweight-mode" => toggle_lightweight(app),
             "quit-app" => app.exit(0),
+            id if id.starts_with("trae_tray_account_") => on_trae_account_click(app, id),
+            "trae_tray_checkin" => start_trae_checkin_all(app),
             _ => {}
         })
         .build(app)?;
@@ -71,6 +73,15 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
     watch_taskbar_theme(app.handle().clone());
 
     Ok(())
+}
+
+/// TRAE 账号集变化（导入/删除/启动实例）后由 trae_commands 调用：重建含 TRAE
+/// 分组的托盘菜单。沿用 build_tray_menu 单点重建，禁止独立重建线程（会 set_menu 竞争）。
+pub fn on_trae_accounts_changed(app: &AppHandle) {
+    #[cfg(windows)]
+    refresh_tray_menu(app);
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
@@ -650,10 +661,27 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>>
     )?;
     let quit_item = MenuItem::with_id(app, "quit-app", "退出应用", true, None::<&str>)?;
 
-    MenuBuilder::new(app)
+    let builder = MenuBuilder::new(app)
         .item(&open_item)
         .item(&github_item)
-        .item(&checkin_item)
+        .item(&checkin_item);
+    // TRAE 分组（仅 Windows）：动态账号快捷项 + 「TRAE 一键签到」，并入单点重建。
+    // 条目需存活到 build()，先绑定在函数作用域再逐个挂入。
+    #[cfg(windows)]
+    let trae_group = trae_menu_items(app).unwrap_or_default();
+    #[cfg(windows)]
+    let builder = {
+        let mut b = builder;
+        if !trae_group.is_empty() {
+            b = b.separator();
+            for item in &trae_group {
+                b = b.item(item);
+            }
+            b = b.separator();
+        }
+        b
+    };
+    builder
         .separator()
         .item(&update_item)
         .separator()
@@ -661,6 +689,146 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>>
         .separator()
         .item(&quit_item)
         .build()
+}
+
+/// TRAE 菜单条目（仅 Windows）：[禁用头部, 账号×N（★ 主实例 / ● 工具实例 / ○ 未运行，
+/// 上限 20 条防菜单溢出）, 「TRAE 一键签到」]。无状态 / 无账号返回 None。
+#[cfg(windows)]
+fn trae_menu_items<R: Runtime, M: Manager<R>>(app: &M) -> Option<Vec<MenuItem<R>>> {
+    /// 菜单条数上限：防账号过多把托盘菜单撑出屏幕。
+    const TRAE_GROUP_MAX: usize = 20;
+
+    let trae = app.try_state::<trae_core::store::TraeState>()?;
+    let accounts: Vec<trae_core::models::Account> = {
+        let data = trae.data.lock().unwrap();
+        data.get_accounts().to_vec()
+    };
+    if accounts.is_empty() {
+        return None;
+    }
+
+    let main = trae_core::trae_machine::probe_main_instance();
+    let mut items = Vec::with_capacity(accounts.len().min(TRAE_GROUP_MAX) + 2);
+    items.push(
+        MenuItem::with_id(app, "trae-tray-header", "TRAE 签到", false, None::<&str>).ok()?,
+    );
+    for a in accounts.iter().take(TRAE_GROUP_MAX) {
+        let prefix = match trae_core::trae_machine::account_state(a, &main) {
+            trae_core::trae_machine::InstanceSource::Main => "★",
+            trae_core::trae_machine::InstanceSource::Tool => "●",
+            trae_core::trae_machine::InstanceSource::None => "○",
+        };
+        let name = if a.name.trim().is_empty() { &a.id } else { &a.name };
+        let title = format!("{prefix} {name}");
+        let id = format!("trae_tray_account_{}", a.id);
+        items.push(MenuItem::with_id(app, id, title, true, None::<&str>).ok()?);
+    }
+    items.push(
+        MenuItem::with_id(app, "trae_tray_checkin", "TRAE 一键签到", true, None::<&str>).ok()?,
+    );
+    Some(items)
+}
+
+/// 托盘 TRAE 账号项点击：主/工具实例运行则聚焦对应窗口，未运行则后台启动。
+#[cfg(windows)]
+fn on_trae_account_click(app: &AppHandle, id: &str) {
+    const PREFIX: &str = "trae_tray_account_";
+    let account_id = &id[PREFIX.len()..];
+    let account = {
+        let Some(state) = app.try_state::<trae_core::store::TraeState>() else {
+            return;
+        };
+        let data = state.data.lock().unwrap();
+        data.get_accounts()
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+    };
+    let Some(account) = account else {
+        return; // 账号已不存在，忽略
+    };
+    let main = trae_core::trae_machine::probe_main_instance();
+    match trae_core::trae_machine::account_state(&account, &main) {
+        trae_core::trae_machine::InstanceSource::Tool => {
+            if let Some(d) = account.data_dir.as_deref().filter(|s| !s.is_empty()) {
+                if let Err(e) = trae_core::trae_machine::focus_instance_window(d) {
+                    eprintln!("[tray] 聚焦账号 {account_id} 工具实例失败: {e}");
+                }
+            }
+        }
+        trae_core::trae_machine::InstanceSource::Main => {
+            match trae_core::trae_machine::main_data_dir() {
+                Ok(d) => {
+                    if let Err(e) =
+                        trae_core::trae_machine::focus_instance_window(&d.to_string_lossy())
+                    {
+                        eprintln!("[tray] 聚焦账号 {account_id} 主实例失败: {e}");
+                    }
+                }
+                Err(e) => eprintln!("[tray] 获取主实例目录失败: {e}"),
+            }
+        }
+        trae_core::trae_machine::InstanceSource::None => {
+            // 后台启动，避免阻塞菜单事件回调
+            let app_handle = app.clone();
+            let account_id = account_id.to_string();
+            std::thread::spawn(move || {
+                if let Err(e) =
+                    crate::trae_commands::launch_account_by_id(&app_handle, &account_id)
+                {
+                    eprintln!("[tray] 启动账号 {account_id} 失败: {e}");
+                }
+            });
+        }
+    }
+}
+
+static TRAE_CHECKIN_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 托盘「TRAE 一键签到」：Rust 侧直执行（旧 TraeMate 是转发前端，合并后由宿主执行）。
+/// 进度事件经 AppNotifier 推给前端刷新，结束后发系统通知。
+#[cfg(windows)]
+fn start_trae_checkin_all(app: &AppHandle) {
+    if crate::is_screenshot_demo() {
+        return;
+    }
+    if TRAE_CHECKIN_BUSY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let notifier = crate::trae_commands::AppNotifier(app.clone());
+        let client = app.state::<reqwest::Client>();
+        let state = app.state::<trae_core::store::TraeState>();
+        let results = trae_core::checkin::perform_all_checkin(
+            Some(&notifier),
+            client.inner(),
+            state.inner(),
+            2,
+        )
+        .await;
+        TRAE_CHECKIN_BUSY.store(false, Ordering::Release);
+
+        let success = results.iter().filter(|(_, r)| r.success).count();
+        let failed = results.len() - success;
+        if success > 0 || failed > 0 {
+            let body = if failed > 0 {
+                format!("成功 {success} 个，失败 {failed} 个")
+            } else {
+                format!("成功签到 {success} 个账号")
+            };
+            use tauri_plugin_notification::NotificationExt;
+            let _ = app
+                .notification()
+                .builder()
+                .title("Trae 签到")
+                .body(body)
+                .show();
+        }
+    });
 }
 
 /// macOS 托盘图标：单色模板素材（系统按明暗主题自动着色）。
@@ -879,8 +1047,8 @@ fn format_checkin_tooltip(value: &Value) -> String {
 mod tests {
     use super::{
         format_checkin_tooltip, is_silent_startup, should_activate_on_second_launch,
-        should_keep_tray_alive, should_wake_main_window, tray_icon, tray_icon_variant, MouseButton,
-        MouseButtonState, TrayIconVariant,
+        should_keep_tray_alive, should_wake_main_window, taskbar_uses_light_theme, tray_icon,
+        tray_icon_variant, MouseButton, MouseButtonState, TrayIconVariant,
     };
     use serde_json::json;
 

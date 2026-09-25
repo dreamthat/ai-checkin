@@ -4,7 +4,8 @@
 //! token 不出本机。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
+use trae_core::store::TraeState;
 use wb_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide, config,
     credit_usage, credits, export_import, limits, notifications, oauth, process, rate_limit_events,
@@ -55,6 +57,110 @@ struct Assets;
 /// 切换进度缓存：webui 通过 GET /api/switch/progress 轮询。
 static SWITCH_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 static SWITCH_RUNNING: Mutex<bool> = Mutex::new(false);
+
+// ---------------------------------------------------------------------------
+// TRAE 子系统(自 trae-mate 合并;数据根 ~/.wb-switch/trae/)
+// ---------------------------------------------------------------------------
+
+/// server 形态没有 Tauri 的 app_config_dir:TRAE exe 路径等宿主配置统一存放在
+/// trae_dir() 下(桌面端存应用配置目录,两形态互不影响)。
+static TRAE_STATE: OnceLock<TraeState> = OnceLock::new();
+static TRAE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static TRAE_SCHED_GEN: AtomicU64 = AtomicU64::new(0);
+
+pub fn trae_state() -> &'static TraeState {
+    TRAE_STATE.get_or_init(|| TraeState::new(config::trae_dir()))
+}
+
+fn trae_client() -> &'static reqwest::Client {
+    TRAE_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// server 启动时初始化 TRAE 子系统:确保数据目录、静默迁移旧 TraeMate 数据、
+/// 按设置启动定时签到循环(由 main.rs spawn_background_loops 调用)。
+pub fn init_trae() {
+    let dir = config::trae_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    // server 无应用配置目录:exe 路径迁移目标传 None(仅迁移账号/日志数据)
+    let report = trae_core::migrate::migrate_from_legacy(&dir, None);
+    if report.detected {
+        println!(
+            "[TRAE] 已迁移旧 TraeMate 数据: 账号 {}, 日志 {}(跳过 {} 项: {:?})",
+            report.accounts_imported,
+            report.logs_imported,
+            report.skipped.len(),
+            report.skipped
+        );
+    }
+    trae_start_scheduler();
+}
+
+/// TRAE 定时签到调度(server 形态):与桌面端 trae_scheduler 同语义——
+/// generation 计数控制任务生命周期(旧任务自行退出),分段 sleep 15s 及时响应
+/// stop/restart;无系统通知能力,结果降级为 stdout 日志。
+fn trae_start_scheduler() -> bool {
+    let gen = TRAE_SCHED_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let settings = trae_state().data.lock().unwrap().get_settings();
+    if !settings.auto_checkin {
+        return true;
+    }
+    let state = trae_state();
+    let client = trae_client();
+    tokio::spawn(async move {
+        loop {
+            if TRAE_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            let dur = {
+                let settings = state.data.lock().unwrap().get_settings();
+                match trae_core::schedule::next_run_duration(&settings) {
+                    Some(d) => d,
+                    None => break,
+                }
+            };
+            // 分段 sleep,每 15s 检查 generation,及时响应 stop/restart
+            let mut remaining = dur;
+            while remaining > std::time::Duration::ZERO {
+                if TRAE_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                    break;
+                }
+                let step = remaining.min(std::time::Duration::from_secs(15));
+                tokio::time::sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
+            if TRAE_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            trae_run_auto_checkin(state, client).await;
+        }
+    });
+    true
+}
+
+/// TRAE 自动签到执行体(无通知者,结果打日志)。
+async fn trae_run_auto_checkin(state: &TraeState, client: &reqwest::Client) {
+    let settings = state.data.lock().unwrap().get_settings();
+    // 自动签到账号间冷却间隔(分钟),最短 3 分钟(与桌面端一致)
+    let interval_secs = (settings.auto_checkin_interval_min.max(3) as u64) * 60;
+    let results =
+        trae_core::checkin::perform_all_checkin(None, client, state, interval_secs).await;
+    let success = results.iter().filter(|(_, r)| r.success).count();
+    let failed = results.len() - success;
+    println!("[TRAE] 自动签到完成: 成功 {success}, 失败 {failed}");
+}
+
+/// TRAE 命令结果序列化:AppResult<T> 成功回 JSON 值,失败回 {ok:false,error}
+/// (与前端 api.ts 双通道错误处理约定一致)。
+fn trae_json<T: serde::Serialize>(r: Result<T, trae_core::error::AppError>) -> Response {
+    match r {
+        Ok(v) => json_ok(serde_json::to_value(v).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn body_str(body: &Value, key: &str) -> Option<String> {
+    body.get(key).and_then(Value::as_str).map(String::from)
+}
 
 pub fn router() -> Router {
     Router::new()
@@ -157,6 +263,46 @@ pub fn router() -> Router {
             "/api/update/config",
             get(api_update_config).post(api_save_update_config),
         )
+        // ---- TRAE(仅 Windows 完整可用;非 Windows 由 trae-core 返回友好错误)----
+        .route("/api/trae/accounts", get(api_trae_accounts))
+        .route("/api/trae/accounts/import-desktop", post(api_trae_import_desktop))
+        .route("/api/trae/accounts/update", post(api_trae_update_account))
+        .route("/api/trae/accounts/delete", post(api_trae_delete_account))
+        .route("/api/trae/accounts/add-jwt", post(api_trae_add_jwt))
+        .route("/api/trae/checkin", post(api_trae_checkin))
+        .route("/api/trae/checkin-all", post(api_trae_checkin_all))
+        .route("/api/trae/points", post(api_trae_points))
+        .route("/api/trae/logs", get(api_trae_logs))
+        .route("/api/trae/logs/clear", post(api_trae_clear_logs))
+        .route(
+            "/api/trae/settings",
+            get(api_trae_get_settings).post(api_trae_save_settings),
+        )
+        .route("/api/trae/scheduler/start", post(api_trae_scheduler_start))
+        .route("/api/trae/scheduler/stop", post(api_trae_scheduler_stop))
+        .route("/api/trae/next-run", get(api_trae_next_run))
+        .route("/api/trae/launch", post(api_trae_launch))
+        .route(
+            "/api/trae/exe-path",
+            get(api_trae_get_exe_path).post(api_trae_set_exe_path),
+        )
+        .route("/api/trae/exe-path/scan", post(api_trae_scan_exe_path))
+        .route("/api/trae/instance-state", post(api_trae_instance_state))
+        .route("/api/trae/focus", post(api_trae_focus))
+        .route("/api/trae/login-instance", post(api_trae_open_login_instance))
+        .route("/api/trae/instance-dirs", get(api_trae_instance_dirs))
+        .route("/api/trae/import-dir", post(api_trae_import_dir))
+        .route("/api/trae/refresh-credential", post(api_trae_refresh_credential))
+        .route("/api/trae/jwt-preview", post(api_trae_jwt_preview))
+        .route("/api/trae/refresh-jwt", post(api_trae_refresh_jwt))
+        .route("/api/trae/cooldown/clear", post(api_trae_cooldown_clear))
+        .route("/api/trae/cooldown/clear-all", post(api_trae_cooldown_clear_all))
+        .route("/api/trae/device/reset", post(api_trae_device_reset))
+        .route("/api/trae/credits/fetch", post(api_trae_credits_fetch))
+        .route("/api/trae/credits/refresh-all", post(api_trae_credits_refresh_all))
+        .route("/api/trae/credits/daily", get(api_trae_credits_daily))
+        .route("/api/trae/open-url", post(api_trae_open_url))
+        .route("/api/trae/migrate", post(api_trae_migrate))
         .fallback(static_handler)
 }
 
@@ -1104,4 +1250,434 @@ async fn api_clear_notifications() -> Response {
         Ok(()) => json_ok(json!({ "cleared": true })),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
+}
+
+// ---------------------------------------------------------------------------
+// TRAE 子系统(对应桌面端 trae_commands.rs 的 35 个命令;核心逻辑在 trae-core)
+// ---------------------------------------------------------------------------
+
+fn trae_missing(param: &str) -> Response {
+    json_err(format!("缺少 {param}"), StatusCode::BAD_REQUEST)
+}
+
+fn trae_not_found(id: &str) -> Response {
+    json_err(format!("账号不存在: {id}"), StatusCode::NOT_FOUND)
+}
+
+async fn api_trae_accounts() -> Response {
+    json_ok(
+        serde_json::to_value(trae_core::views::build_account_views(trae_state()))
+            .unwrap_or(json!([])),
+    )
+}
+
+async fn api_trae_import_desktop() -> Response {
+    trae_json(trae_core::accounts::import_desktop(trae_state()))
+}
+
+async fn api_trae_update_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return trae_missing("id");
+    };
+    // 兼容两种形态:{id, updates:{...}} 或把更新字段直接平铺在 body 里
+    let updates = body.get("updates").cloned().unwrap_or_else(|| body.clone());
+    trae_json(trae_core::accounts::update(trae_state(), &id, updates))
+}
+
+async fn api_trae_delete_account(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "id") {
+        Some(id) => trae_json(trae_core::accounts::delete(trae_state(), &id)),
+        None => trae_missing("id"),
+    }
+}
+
+async fn api_trae_add_jwt(Json(body): Json<Value>) -> Response {
+    let Some(jwt) = body_str(&body, "jwt") else {
+        return trae_missing("jwt");
+    };
+    let name = body_str(&body, "name").unwrap_or_default();
+    let refresh_token = body_str(&body, "refreshToken");
+    let enabled = body.get("enabled").and_then(Value::as_bool);
+    trae_json(trae_core::accounts::add_jwt(
+        trae_state(),
+        name,
+        &jwt,
+        refresh_token,
+        enabled,
+    ))
+}
+
+async fn api_trae_checkin(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "id") {
+        Some(id) => trae_json(
+            trae_core::accounts::checkin_one(trae_state(), trae_client(), &id).await,
+        ),
+        None => trae_missing("id"),
+    }
+}
+
+async fn api_trae_checkin_all() -> Response {
+    // 手动一键签到:账号间保持 2s 快速执行(与桌面端一致;自动定时签到用分钟级间隔)
+    let results =
+        trae_core::checkin::perform_all_checkin(None, trae_client(), trae_state(), 2).await;
+    json_ok(serde_json::to_value(results).unwrap_or(json!([])))
+}
+
+async fn api_trae_points(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "id") {
+        Some(id) => {
+            trae_json(trae_core::accounts::account_points(trae_state(), trae_client(), &id).await)
+        }
+        None => trae_missing("id"),
+    }
+}
+
+async fn api_trae_logs(RawQuery(query): RawQuery) -> Response {
+    let limit = query
+        .as_deref()
+        .and_then(|q| {
+            q.split('&').find_map(|p| p.split_once('=')).and_then(|(k, v)| {
+                (k == "limit").then_some(v).and_then(|v| v.parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(100);
+    let data = trae_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.get_logs(limit)).unwrap_or(json!([])))
+}
+
+async fn api_trae_clear_logs() -> Response {
+    let state = trae_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.clear_logs();
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!(true)),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_trae_get_settings() -> Response {
+    // server 形态无自启插件:launch_at_login 返回存储值
+    // (桌面端 trae_get_settings 会以系统自启真实状态覆盖)
+    let s = trae_state().data.lock().unwrap().get_settings();
+    json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+}
+
+async fn api_trae_save_settings(Json(body): Json<Value>) -> Response {
+    // 前端发送 {settings: partial};兼容直接平铺的 partial
+    let payload = body.get("settings").cloned().unwrap_or(body);
+    let settings: trae_core::models::PartialAppSettings = match serde_json::from_value(payload) {
+        Ok(s) => s,
+        Err(e) => return json_err(format!("设置格式错误: {e}"), StatusCode::BAD_REQUEST),
+    };
+    let state = trae_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        let s = data.save_settings(settings);
+        data.save(&state.store_file()).map(|_| s)
+    };
+    match r {
+        Ok(s) => {
+            // 设置变更后重启定时任务(与桌面端 trae_save_settings 一致)
+            trae_start_scheduler();
+            json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_trae_scheduler_start() -> Response {
+    json_ok(json!(trae_start_scheduler()))
+}
+
+async fn api_trae_scheduler_stop() -> Response {
+    TRAE_SCHED_GEN.fetch_add(1, Ordering::SeqCst);
+    json_ok(json!(true))
+}
+
+async fn api_trae_next_run() -> Response {
+    let settings = trae_state().data.lock().unwrap().get_settings();
+    let next = if settings.auto_checkin {
+        trae_core::schedule::next_run_instant(&settings).map(|dt| dt.to_rfc3339())
+    } else {
+        None
+    };
+    json_ok(json!(next))
+}
+
+async fn api_trae_launch(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "id") {
+        Some(id) => {
+            // server 形态:exe 路径等宿主配置存 trae_dir()(桌面端存应用配置目录)
+            let config_dir = config::trae_dir();
+            trae_json(trae_core::trae_instance::launch_account(
+                trae_state(),
+                &config_dir,
+                &id,
+            ))
+        }
+        None => trae_missing("id"),
+    }
+}
+
+async fn api_trae_get_exe_path() -> Response {
+    let config_dir = config::trae_dir();
+    match trae_core::trae_machine::get_saved_trae_path(&config_dir) {
+        Ok(p) => json_ok(json!(p)),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_trae_set_exe_path(Json(body): Json<Value>) -> Response {
+    let Some(path) = body_str(&body, "path") else {
+        return trae_missing("path");
+    };
+    let config_dir = config::trae_dir();
+    match trae_core::trae_machine::save_trae_path(&config_dir, &path) {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_trae_scan_exe_path() -> Response {
+    match trae_core::trae_machine::scan_trae_exe_path() {
+        Ok(scanned) => {
+            let config_dir = config::trae_dir();
+            let _ = trae_core::trae_machine::save_trae_path(&config_dir, &scanned);
+            json_ok(json!(scanned))
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_trae_instance_state(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return trae_missing("id");
+    };
+    let state = trae_state();
+    let Some(account) = trae_core::accounts::get_account(state, &id) else {
+        return trae_not_found(&id);
+    };
+    let main = trae_core::trae_machine::probe_main_instance();
+    let source = trae_core::trae_machine::account_state(&account, &main);
+    let is_main_account = main.1.as_deref()
+        == account
+            .desktop_user_id
+            .as_deref()
+            .filter(|s| !s.is_empty());
+    json_ok(json!({
+        "running": !matches!(source, trae_core::trae_machine::InstanceSource::None),
+        "source": serde_json::to_value(source).unwrap_or(json!(null)),
+        "isMainAccount": is_main_account,
+    }))
+}
+
+async fn api_trae_focus(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return trae_missing("id");
+    };
+    let state = trae_state();
+    let Some(account) = trae_core::accounts::get_account(state, &id) else {
+        return trae_not_found(&id);
+    };
+    let main = trae_core::trae_machine::probe_main_instance();
+    let r = match trae_core::trae_machine::account_state(&account, &main) {
+        trae_core::trae_machine::InstanceSource::Tool => {
+            match account.data_dir.as_deref().filter(|s| !s.is_empty()) {
+                Some(d) => trae_core::trae_machine::focus_instance_window(d),
+                None => Err(trae_core::error::AppError::Launch(
+                    "该账号无工具实例数据目录".into(),
+                )),
+            }
+        }
+        trae_core::trae_machine::InstanceSource::Main => trae_core::trae_machine::main_data_dir()
+            .and_then(|dir| {
+                trae_core::trae_machine::focus_instance_window(&dir.to_string_lossy())
+            }),
+        trae_core::trae_machine::InstanceSource::None => Err(trae_core::error::AppError::Launch(
+            "该账号尚未启动,无实例可聚焦".into(),
+        )),
+    };
+    trae_json(r)
+}
+
+async fn api_trae_open_login_instance() -> Response {
+    let Ok(appdata) = std::env::var("APPDATA") else {
+        return json_err(
+            "无法获取 APPDATA 环境变量".into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    };
+    let config_dir = config::trae_dir();
+    let exe_path = match trae_core::trae_machine::resolve_trae_path(&config_dir) {
+        Ok(p) => p,
+        Err(e) => return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    // 临时 data-dir(带 uuid 后缀,避免与标准目录或多次操作冲突;与桌面端一致)
+    let temp_dir = std::path::PathBuf::from(&appdata)
+        .join(format!(
+            "{} login {}",
+            trae_core::trae_machine::DATA_DIR_NAME,
+            uuid::Uuid::new_v4()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let shared_ext = std::path::PathBuf::from(&appdata)
+        .join(trae_core::trae_instance::SHARED_EXTENSIONS_DIR)
+        .to_string_lossy()
+        .to_string();
+    if let Err(e) = trae_core::trae_machine::open_product_with_data_dir(
+        &exe_path,
+        &temp_dir,
+        Some(&shared_ext),
+    ) {
+        return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    // server 无事件通道:导入在后台线程执行,结果仅打日志,webui 刷新账号列表可见
+    let state = trae_state();
+    let appdata_owned = appdata;
+    let temp_dir_owned = temp_dir;
+    std::thread::spawn(move || {
+        let result =
+            trae_core::trae_instance::import_logged_in_temp_dir(state, &appdata_owned, &temp_dir_owned);
+        println!("[TRAE] 登录导入结果: {result}");
+    });
+    json_ok(json!({ "ok": true }))
+}
+
+async fn api_trae_instance_dirs() -> Response {
+    json_ok(
+        serde_json::to_value(trae_core::trae_instance::scan_bound_dirs(trae_state()))
+            .unwrap_or(json!([])),
+    )
+}
+
+async fn api_trae_import_dir(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "dataDir") {
+        Some(dir) => trae_json(trae_core::accounts::import_from_dir(trae_state(), &dir)),
+        None => trae_missing("dataDir"),
+    }
+}
+
+async fn api_trae_refresh_credential(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return trae_missing("id");
+    };
+    let state = trae_state();
+    let Some(account) = trae_core::accounts::get_account(state, &id) else {
+        return trae_not_found(&id);
+    };
+    if let Err(e) =
+        trae_core::checkin::refresh_account_credential(&account, trae_client(), state).await
+    {
+        return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    match trae_core::accounts::get_account(state, &id) {
+        Some(acc) => json_ok(
+            serde_json::to_value(trae_core::models::PublicAccount::from(acc))
+                .unwrap_or(json!(null)),
+        ),
+        None => trae_not_found(&id),
+    }
+}
+
+async fn api_trae_jwt_preview(Json(body): Json<Value>) -> Response {
+    let Some(jwt) = body_str(&body, "jwt") else {
+        return trae_missing("jwt");
+    };
+    let info = trae_core::jwt::parse(&jwt);
+    if info.user_id.is_none() {
+        return json_err(
+            "无法从 JWT 解析 user_id,请检查格式".into(),
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    json_ok(serde_json::to_value(info).unwrap_or(json!(null)))
+}
+
+async fn api_trae_refresh_jwt(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "userId") {
+        Some(uid) => {
+            trae_json(trae_core::accounts::refresh_jwt(trae_state(), trae_client(), &uid).await)
+        }
+        None => trae_missing("userId"),
+    }
+}
+
+async fn api_trae_cooldown_clear(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "userId") {
+        Some(uid) => {
+            trae_core::cooldown::clear_cooldown(trae_state(), &uid);
+            json_ok(json!({ "ok": true }))
+        }
+        None => trae_missing("userId"),
+    }
+}
+
+async fn api_trae_cooldown_clear_all() -> Response {
+    json_ok(json!(trae_core::cooldown::clear_all_cooldowns(trae_state())))
+}
+
+async fn api_trae_device_reset(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "userId") {
+        Some(uid) => {
+            trae_core::device_map::reset_device_for(trae_state(), &uid);
+            json_ok(json!({ "ok": true }))
+        }
+        None => trae_missing("userId"),
+    }
+}
+
+async fn api_trae_credits_fetch(Json(body): Json<Value>) -> Response {
+    match body_str(&body, "userId") {
+        Some(uid) => {
+            trae_json(trae_core::accounts::fetch_remaining(trae_state(), trae_client(), &uid).await)
+        }
+        None => trae_missing("userId"),
+    }
+}
+
+async fn api_trae_credits_refresh_all() -> Response {
+    trae_json(
+        trae_core::credits::refresh_remaining_credits(trae_state(), trae_client())
+            .await
+            .map_err(trae_core::error::AppError::Credential),
+    )
+}
+
+async fn api_trae_credits_daily() -> Response {
+    let snaps: Vec<trae_core::models::CreditsDailySnapshot> =
+        trae_core::fs_utils::read_json(&trae_state().data_path("credits_daily.json"));
+    json_ok(serde_json::to_value(snaps).unwrap_or(json!([])))
+}
+
+async fn api_trae_open_url(Json(body): Json<Value>) -> Response {
+    let Some(url) = body_str(&body, "url") else {
+        return trae_missing("url");
+    };
+    #[cfg(windows)]
+    {
+        if let Err(e) = std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+        {
+            return json_err(
+                format!("打开链接失败: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = url;
+    json_ok(json!({ "ok": true }))
+}
+
+async fn api_trae_migrate() -> Response {
+    // server 无应用配置目录:exe 路径迁移目标传 None(仅迁移账号/日志数据)
+    let trae_dir = config::trae_dir();
+    let _ = std::fs::create_dir_all(&trae_dir);
+    let report = trae_core::migrate::migrate_from_legacy(&trae_dir, None);
+    json_ok(serde_json::to_value(report).unwrap_or(json!(null)))
 }

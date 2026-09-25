@@ -55,6 +55,11 @@ pub fn store_dir() -> PathBuf {
     home_dir().join(".wb-switch")
 }
 
+/// TRAE(并入自 trae-mate)数据根目录:~/.wb-switch/trae/
+pub fn trae_dir() -> PathBuf {
+    store_dir().join("trae")
+}
+
 pub fn accounts_file() -> PathBuf {
     store_dir().join("accounts.json")
 }

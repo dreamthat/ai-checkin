@@ -4,10 +4,12 @@ mod commands;
 mod instance_lock;
 #[cfg(desktop)]
 mod tray;
+mod trae_commands;
+mod trae_scheduler;
 mod update_service;
 
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use wb_switch_core::modules;
 
 const SCREENSHOT_DEMO_ENV: &str = "WB_SWITCH_SCREENSHOT_DEMO";
@@ -109,6 +111,11 @@ fn spawn_background_loops(app: tauri::AppHandle) {
     // 同样在跑，托盘菜单随时反映最新阶段。
     update_service::spawn_periodic_check(app.clone());
 
+    // TRAE 定时签到：独立的每日定点循环（Asia/Shanghai，读 TraeState.settings）。
+    // 与上方 workbuddy 签到周期（StartupVerify / PeriodicRecovery）语义不同，独立成环互不影响。
+    // 未开启 auto_checkin 时内部直接返回，设置变更经 trae_save_settings 重启调度。
+    trae_scheduler::start_scheduler(app.clone());
+
     // 限额 hook 信号：轮询 `~/.wb-switch/hook-events.jsonl`（CLI / WorkBuddy 的 429 当轮
     // 由客户端 hook 追加），入账后通知前端立即拉取。轻量模式下窗口销毁但进程仍在，
     // 状态由后端持有（见 `rate_limit_events.rs`）。
@@ -171,6 +178,31 @@ pub fn run() {
                 tray::setup_startup_visibility(
                     app.handle(),
                     tray::is_silent_startup(std::env::args()),
+                );
+            }
+            // TRAE 子系统：数据根 ~/.wb-switch/trae/、状态、HTTP 客户端与调度器状态。
+            // 与 workbuddy 主功能共用进程但状态完全独立（不同产品平台，零功能重叠）。
+            let trae_dir = wb_switch_core::modules::config::trae_dir();
+            let _ = std::fs::create_dir_all(&trae_dir);
+            app.manage(trae_core::store::TraeState::new(trae_dir.clone()));
+            app.manage(reqwest::Client::new());
+            app.manage(trae_scheduler::TraeSchedulerState::default());
+            // 旧 TraeMate 数据静默迁移（只拷贝不删除、幂等；失败仅日志，
+            // 可由 trae_migrate_legacy_data 手动重跑并查看报告）。
+            let config_dir = app.path().app_config_dir().ok();
+            let report = trae_core::migrate::migrate_from_legacy(&trae_dir, config_dir.as_deref());
+            if report.detected {
+                println!(
+                    "[trae] 旧版数据迁移完成: 账号 {} 条, 日志 {} 条, 文件 {} 个, 跳过 {} 项{}",
+                    report.accounts_imported,
+                    report.logs_imported,
+                    report.files.len(),
+                    report.skipped.len(),
+                    if report.legacy_process_running {
+                        "; 警告: 检测到旧 TraeMate 仍在运行,请退出并卸载旧版,避免双开竞争签到"
+                    } else {
+                        ""
+                    }
                 );
             }
             // README 截图模式只渲染前端虚构数据，禁止读取账号后执行签到、轮换或保活。
@@ -250,6 +282,42 @@ pub fn run() {
             commands::log_error,
             commands::get_error_log_path,
             commands::reveal_error_log,
+            // TRAE 子系统（签到/多开/积分,见 trae_commands.rs;与主功能独立）
+            trae_commands::trae_get_accounts,
+            trae_commands::trae_import_desktop_account,
+            trae_commands::trae_update_account,
+            trae_commands::trae_delete_account,
+            trae_commands::trae_checkin_account,
+            trae_commands::trae_checkin_all,
+            trae_commands::trae_get_account_points,
+            trae_commands::trae_get_logs,
+            trae_commands::trae_clear_logs,
+            trae_commands::trae_get_settings,
+            trae_commands::trae_save_settings,
+            trae_commands::trae_start_scheduler,
+            trae_commands::trae_stop_scheduler,
+            trae_commands::trae_get_next_run_time,
+            trae_commands::trae_launch_account_multi,
+            trae_commands::trae_get_trae_exe_path,
+            trae_commands::trae_set_trae_exe_path,
+            trae_commands::trae_scan_trae_exe_path,
+            trae_commands::trae_get_account_instance_state,
+            trae_commands::trae_focus_account_instance,
+            trae_commands::trae_open_new_login_instance,
+            trae_commands::trae_scan_instance_dirs,
+            trae_commands::trae_import_account_from_dir,
+            trae_commands::trae_refresh_account_credential,
+            trae_commands::trae_account_add_jwt,
+            trae_commands::trae_jwt_parse_preview,
+            trae_commands::trae_refresh_jwt_account,
+            trae_commands::trae_cooldown_clear,
+            trae_commands::trae_cooldown_clear_all,
+            trae_commands::trae_device_reset,
+            trae_commands::trae_fetch_remaining_credits,
+            trae_commands::trae_refresh_all_remaining_credits,
+            trae_commands::trae_credits_daily_list,
+            trae_commands::trae_open_url,
+            trae_commands::trae_migrate_legacy_data,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

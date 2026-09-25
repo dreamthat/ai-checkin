@@ -41,6 +41,17 @@ import type {
   VscodeSessionList,
   VscodeSessionRef,
   WbVariant,
+  TraeAccount,
+  TraeCheckinLog,
+  TraeCheckinResult,
+  TraeCreditsDailySnapshot,
+  TraeInstanceDirInfo,
+  TraeInstanceState,
+  TraeJwtInfo,
+  TraeLaunchResult,
+  TraeMigrationReport,
+  TraePointsResult,
+  TraeSettings,
 } from "./types";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled } from "./demo-mode";
 import { screenshotDemoResponse } from "./screenshot-demo";
@@ -148,6 +159,42 @@ const ROUTES: Record<string, Route> = {
   save_github_config: { method: "POST", path: "/api/update/config" },
   check_update: { method: "GET", path: "/api/update/check" },
   switch_progress: { method: "GET", path: "/api/switch/progress" },
+  // TRAE 子系统（trae-mate 合并；与 src-tauri/src/trae_commands.rs 一一对应）
+  trae_get_accounts: { method: "GET", path: "/api/trae/accounts" },
+  trae_import_desktop_account: { method: "POST", path: "/api/trae/accounts/import-desktop" },
+  trae_update_account: { method: "POST", path: "/api/trae/accounts/update" },
+  trae_delete_account: { method: "POST", path: "/api/trae/accounts/delete" },
+  trae_checkin_account: { method: "POST", path: "/api/trae/checkin" },
+  trae_checkin_all: { method: "POST", path: "/api/trae/checkin-all" },
+  trae_get_account_points: { method: "POST", path: "/api/trae/points" },
+  trae_get_logs: { method: "GET", path: "/api/trae/logs" },
+  trae_clear_logs: { method: "POST", path: "/api/trae/logs/clear" },
+  trae_get_settings: { method: "GET", path: "/api/trae/settings" },
+  trae_save_settings: { method: "POST", path: "/api/trae/settings" },
+  trae_start_scheduler: { method: "POST", path: "/api/trae/scheduler/start" },
+  trae_stop_scheduler: { method: "POST", path: "/api/trae/scheduler/stop" },
+  trae_get_next_run_time: { method: "GET", path: "/api/trae/next-run" },
+  trae_launch_account_multi: { method: "POST", path: "/api/trae/launch" },
+  trae_get_trae_exe_path: { method: "GET", path: "/api/trae/exe-path" },
+  trae_set_trae_exe_path: { method: "POST", path: "/api/trae/exe-path" },
+  trae_scan_trae_exe_path: { method: "POST", path: "/api/trae/exe-path/scan" },
+  trae_get_account_instance_state: { method: "POST", path: "/api/trae/instance-state" },
+  trae_focus_account_instance: { method: "POST", path: "/api/trae/focus" },
+  trae_open_new_login_instance: { method: "POST", path: "/api/trae/login-instance" },
+  trae_scan_instance_dirs: { method: "GET", path: "/api/trae/instance-dirs" },
+  trae_import_account_from_dir: { method: "POST", path: "/api/trae/import-dir" },
+  trae_refresh_account_credential: { method: "POST", path: "/api/trae/refresh-credential" },
+  trae_account_add_jwt: { method: "POST", path: "/api/trae/accounts/add-jwt" },
+  trae_jwt_parse_preview: { method: "POST", path: "/api/trae/jwt-preview" },
+  trae_refresh_jwt_account: { method: "POST", path: "/api/trae/refresh-jwt" },
+  trae_cooldown_clear: { method: "POST", path: "/api/trae/cooldown/clear" },
+  trae_cooldown_clear_all: { method: "POST", path: "/api/trae/cooldown/clear-all" },
+  trae_device_reset: { method: "POST", path: "/api/trae/device/reset" },
+  trae_fetch_remaining_credits: { method: "POST", path: "/api/trae/credits/fetch" },
+  trae_refresh_all_remaining_credits: { method: "POST", path: "/api/trae/credits/refresh-all" },
+  trae_credits_daily_list: { method: "GET", path: "/api/trae/credits/daily" },
+  trae_open_url: { method: "POST", path: "/api/trae/open-url" },
+  trae_migrate_legacy_data: { method: "POST", path: "/api/trae/migrate" },
 };
 
 /**
@@ -781,4 +828,193 @@ export function getErrorLogPath(): Promise<string> {
 export function revealErrorLog(): Promise<void> {
   if (demoModeEnabled || isWebui()) return Promise.resolve();
   return call<unknown>("reveal_error_log").then(() => undefined);
+}
+
+// ---------------------------------------------------------------------------
+// TRAE 子系统（trae-mate 合并）：35 个命令的 call 包装
+// Rust 端 snake_case 参数由 Tauri 自动 camelCase 匹配，HTTP 侧 server 按同表实现，
+// 两端统一传 camelCase（userId / refreshToken / dataDir 等）。
+// ---------------------------------------------------------------------------
+
+/** TRAE 账号列表（含剩余积分 / 冷却 / JWT 状态等展示态）。 */
+export function traeGetAccounts(): Promise<TraeAccount[]> {
+  return call("trae_get_accounts");
+}
+
+/** 导入当前 TRAE 桌面客户端登录的账号。 */
+export function traeImportDesktopAccount(): Promise<TraeAccount> {
+  return call("trae_import_desktop_account");
+}
+
+/** 更新账号字段（name / enabled / jwt / refreshToken 等，后端按需加密写回）。 */
+export function traeUpdateAccount(
+  id: string,
+  updates: Partial<TraeAccount> & { jwt?: string; refreshToken?: string },
+): Promise<TraeAccount> {
+  return call("trae_update_account", { id, updates });
+}
+
+/** 删除账号（保留实例目录，可日后重新扫描导入）。 */
+export function traeDeleteAccount(id: string): Promise<boolean> {
+  return call("trae_delete_account", { id });
+}
+
+/** 单账号签到。 */
+export function traeCheckinAccount(id: string): Promise<TraeCheckinResult> {
+  return call("trae_checkin_account", { id });
+}
+
+/** 一键签到全部启用账号（账号间 2s 快速执行），返回 [账号, 结果] 对。 */
+export function traeCheckinAll(): Promise<[TraeAccount, TraeCheckinResult][]> {
+  return call("trae_checkin_all");
+}
+
+/** 查询账号总积分（成功后回写账号 points）。 */
+export function traeGetAccountPoints(id: string): Promise<TraePointsResult> {
+  return call("trae_get_account_points", { id });
+}
+
+/** 签到日志（新的在前）。 */
+export function traeGetLogs(limit?: number): Promise<TraeCheckinLog[]> {
+  return call("trae_get_logs", limit ? { limit } : undefined);
+}
+
+/** 清空签到日志。 */
+export function traeClearLogs(): Promise<boolean> {
+  return call("trae_clear_logs");
+}
+
+/** TRAE 设置。 */
+export function traeGetSettings(): Promise<TraeSettings> {
+  return call("trae_get_settings");
+}
+
+/** 保存设置（partial；提交后后端会重启定时任务）。 */
+export function traeSaveSettings(partial: Partial<TraeSettings>): Promise<TraeSettings> {
+  return call("trae_save_settings", { settings: partial });
+}
+
+/** 启动自动签到定时任务。 */
+export function traeStartScheduler(): Promise<boolean> {
+  return call("trae_start_scheduler");
+}
+
+/** 停止自动签到定时任务。 */
+export function traeStopScheduler(): Promise<boolean> {
+  return call("trae_stop_scheduler");
+}
+
+/** 下次定时签到时间（ISO 字符串；未启用为 null）。 */
+export function traeGetNextRunTime(): Promise<string | null> {
+  return call("trae_get_next_run_time");
+}
+
+/** 启动账号独立 TRAE 实例（多开）。 */
+export function traeLaunchAccountMulti(id: string): Promise<TraeLaunchResult> {
+  return call("trae_launch_account_multi", { id });
+}
+
+/** 已保存的 TRAE exe 路径（未设置返回 null）。 */
+export function traeGetTraeExePath(): Promise<string | null> {
+  return call("trae_get_trae_exe_path");
+}
+
+/** 手动设置 TRAE exe 路径。 */
+export function traeSetTraeExePath(path: string): Promise<void> {
+  return call("trae_set_trae_exe_path", { path });
+}
+
+/** 自动扫描 TRAE exe 路径并保存，返回扫描到的路径。 */
+export function traeScanTraeExePath(): Promise<string> {
+  return call("trae_scan_trae_exe_path");
+}
+
+/** 查询账号实例运行状态（主实例 / 工具实例 / 未运行）。 */
+export function traeGetAccountInstanceState(id: string): Promise<TraeInstanceState> {
+  return call("trae_get_account_instance_state", { id });
+}
+
+/** 聚焦账号实例窗口（未运行时报错）。 */
+export function traeFocusAccountInstance(id: string): Promise<void> {
+  return call("trae_focus_account_instance", { id });
+}
+
+/** 打开新的空白 TRAE 实例供登录，登录完成后后端自动导入并 emit `trae-login-imported`。 */
+export function traeOpenNewLoginInstance(): Promise<void> {
+  return call("trae_open_new_login_instance");
+}
+
+/** 扫描 %APPDATA% 下已存在的多开 / 登录临时目录。 */
+export function traeScanInstanceDirs(): Promise<TraeInstanceDirInfo[]> {
+  return call("trae_scan_instance_dirs");
+}
+
+/** 从已有多开目录导入账号（同 userId 已存在则更新凭据并绑定目录）。 */
+export function traeImportAccountFromDir(dataDir: string): Promise<TraeAccount> {
+  return call("trae_import_account_from_dir", { dataDir });
+}
+
+/** 手动刷新账号凭证（实例目录回读 + ExchangeToken 刷新 + 回写）。 */
+export function traeRefreshAccountCredential(id: string): Promise<TraeAccount> {
+  return call("trae_refresh_account_credential", { id });
+}
+
+/** 手动录入 JWT 账号。 */
+export function traeAccountAddJwt(
+  name: string,
+  jwt: string,
+  refreshToken?: string,
+  enabled?: boolean,
+): Promise<TraeAccount> {
+  return call("trae_account_add_jwt", { name, jwt, refreshToken, enabled });
+}
+
+/** JWT 解析预览（弹窗实时显示 userId / 剩余小时）。 */
+export function traeJwtParsePreview(jwt: string): Promise<TraeJwtInfo> {
+  return call("trae_jwt_parse_preview", { jwt });
+}
+
+/** 手动刷新 JWT 账号（refresh_token -> ExchangeToken）。 */
+export function traeRefreshJwtAccount(userId: string): Promise<TraeAccount> {
+  return call("trae_refresh_jwt_account", { userId });
+}
+
+/** 清除单个账号冷却状态。 */
+export function traeCooldownClear(userId: string): Promise<void> {
+  return call("trae_cooldown_clear", { userId });
+}
+
+/** 清除所有账号冷却状态，返回清除条数。 */
+export function traeCooldownClearAll(): Promise<number> {
+  return call("trae_cooldown_clear_all");
+}
+
+/** 重置某账号的伪设备身份（下次签到重新派生）。 */
+export function traeDeviceReset(userId: string): Promise<void> {
+  return call("trae_device_reset", { userId });
+}
+
+/** 实时查询单账号剩余积分（写缓存，返回积分值）。 */
+export function traeFetchRemainingCredits(userId: string): Promise<number> {
+  return call("trae_fetch_remaining_credits", { userId });
+}
+
+/** 刷新所有账号剩余积分（含自动解冻），返回处理条数。 */
+export function traeRefreshAllRemainingCredits(): Promise<number> {
+  return call("trae_refresh_all_remaining_credits");
+}
+
+/** 每日积分快照列表（积分看板三线趋势数据源）。 */
+export function traeCreditsDailyList(): Promise<TraeCreditsDailySnapshot[]> {
+  return call("trae_credits_daily_list");
+}
+
+/** 用系统默认浏览器打开外部链接。 */
+export function traeOpenUrl(url: string): Promise<void> {
+  return call("trae_open_url", { url });
+}
+
+/** 手动触发旧 TraeMate 数据迁移（幂等，返回报告）。 */
+export function traeMigrateLegacyData(): Promise<TraeMigrationReport> {
+  return call("trae_migrate_legacy_data");
 }

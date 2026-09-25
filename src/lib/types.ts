@@ -823,6 +823,142 @@ export interface VscodeSessionSyncReport {
   errors: { groupId?: string; error: string }[];
 }
 
+// ---------------------------------------------------------------------------
+// TRAE 子系统（trae-mate 合并）：与 crates/trae-core/src/models.rs serde camelCase 对齐
+// ---------------------------------------------------------------------------
+
+/** TRAE 账号来源：desktop = 桌面实例导入；jwt = 手动录入 JWT（参考模式）。 */
+export type TraeSource = "desktop" | "jwt";
+
+/** TRAE 账号（脱敏 PublicAccount 视图，不含加密凭据）。 */
+export interface TraeAccount {
+  id: string;
+  name: string;
+  cookie: string;
+  createdAt: number;
+  lastCheckinAt: number | null;
+  /** "success" | "failed" | "pending" */
+  lastCheckinResult: string | null;
+  lastCheckinMessage: string | null;
+  points: number | null;
+  enabled: boolean;
+  desktopUserId: string | null;
+  /** "valid" | "expiring" | "expired" */
+  credentialStatus: string | null;
+  dataDir: string | null;
+  machineId: string | null;
+  source: TraeSource;
+  userId: string | null;
+  jwtExpTimestamp: number | null;
+  /** "ok" | "warn" | "expired" | "unknown" */
+  jwtStatus: string | null;
+  hasRefreshToken: boolean;
+  jwtAutoRefresh: boolean;
+  remainingCredits: number | null;
+  creditsExpireAt: number | null;
+  deviceIdMasked: string | null;
+  cooldownType: string | null;
+  /** Unix 秒；SessionDead=9999999999 表示永久。 */
+  cooldownUntil: number | null;
+  cooldownReason: string | null;
+  checkedToday: boolean | null;
+}
+
+/** TRAE 签到日志（后端已按新的在前排序）。 */
+export interface TraeCheckinLog {
+  id: string;
+  accountId: string;
+  accountName: string;
+  time: number;
+  /** "success" | "failed" */
+  result: string;
+  message: string;
+  pointsGained?: number | null;
+}
+
+/** TRAE 应用设置（auto_checkin_interval_min 最短 3，由后端钳制）。 */
+export interface TraeSettings {
+  autoCheckin: boolean;
+  /** "HH:mm" */
+  checkinTime: string;
+  retryCount: number;
+  /** 秒 */
+  retryDelay: number;
+  /** 定时签到时账号间执行间隔（分钟），最短 3 */
+  autoCheckinIntervalMin: number;
+  notifyOnSuccess: boolean;
+  notifyOnFailed: boolean;
+  launchAtLogin: boolean;
+}
+
+/** 单次签到结果。 */
+export interface TraeCheckinResult {
+  success: boolean;
+  message: string;
+  points?: number;
+}
+
+/** 积分查询结果。 */
+export interface TraePointsResult {
+  success: boolean;
+  message: string;
+  totalPoints?: number;
+}
+
+/** 多开启动结果（dataDir/machineId 由后端回写账号）。 */
+export interface TraeLaunchResult {
+  dataDir: string;
+  machineId: string;
+  launched: boolean;
+}
+
+/** 账号实例运行状态：main = 主实例，tool = 本工具启动的独立实例，none = 未运行。 */
+export interface TraeInstanceState {
+  running: boolean;
+  source: "main" | "tool" | "none";
+  isMainAccount: boolean;
+}
+
+/** 已有多开/登录临时目录的扫描结果。 */
+export interface TraeInstanceDirInfo {
+  dataDir: string;
+  userId: string;
+  accountName: string;
+  /** token 过期时间（毫秒），0 表示未知。 */
+  expiresAt: number;
+  /** 含设备签名密钥（可刷新 token）。 */
+  hasSigningKey: boolean;
+  running: boolean;
+  /** 已被应用内账号绑定。 */
+  bound: boolean;
+}
+
+/** JWT 解析预览（不校验签名，仅本地展示）。 */
+export interface TraeJwtInfo {
+  userId: string | null;
+  expHours: number | null;
+  expTimestamp: number | null;
+}
+
+/** 每日积分快照（积分看板三线趋势数据源）。 */
+export interface TraeCreditsDailySnapshot {
+  date: string;
+  total: number;
+  earned: number;
+  consumed: number;
+}
+
+/** 旧 TraeMate 数据迁移报告（幂等，可重复触发）。 */
+export interface TraeMigrationReport {
+  detected: boolean;
+  accountsImported: number;
+  logsImported: number;
+  files: string[];
+  skipped: string[];
+  exePathMigrated: boolean;
+  legacyProcessRunning: boolean;
+}
+
 /** 可复制会话列表。 */
 export interface VscodeSessionList {
   sourceUid: string | null;
