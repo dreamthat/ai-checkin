@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ArrowUp, Loader2, MessagesSquare, Rocket, Settings, Sparkles, User } from "lucide-react";
@@ -11,6 +11,11 @@ import TokenStatsPage from "@/pages/TokenStatsPage";
 import SettingsPage from "@/pages/SettingsPage";
 import TraeAccountsPage from "@/pages/TraeAccountsPage";
 import TraeCreditsPage from "@/pages/TraeCreditsPage";
+import TraeSettingsPage from "@/pages/TraeSettingsPage";
+import QoderPage from "@/pages/QoderPage";
+import QoderSettingsPage from "@/pages/QoderSettingsPage";
+import ZCodePage from "@/pages/ZCodePage";
+import ZCodeSettingsPage from "@/pages/ZCodeSettingsPage";
 import { StatusDot, AppIconMark } from "@/components/product-marks";
 import { CompanionDemoDialog } from "@/components/companion-demo-dialog";
 import { DemoAction } from "@/components/demo-action";
@@ -191,10 +196,10 @@ function UpdateCenter({ running }: { running: boolean | undefined }) {
 }
 
 /**
- * 顶部平台标签页定义:一级平台域切换(Qoder / 灵犀为预留位,接入后补路由与页面即可)。
+ * 顶部平台标签页定义:一级平台域切换(灵犀为预留位,接入后补路由与页面即可)。
  * traeOnly:仅 Windows 或 webui 可用(与 TRAE 侧栏项可见性一致);comingSoon:置灰预留。
  */
-type PlatformTab = "workbuddy" | "trae" | "qoder" | "lingxi";
+type PlatformTab = "workbuddy" | "trae" | "qoder" | "zcode" | "lingxi";
 
 const PLATFORM_TABS: {
   platform: PlatformTab;
@@ -207,15 +212,19 @@ const PLATFORM_TABS: {
 }[] = [
   { platform: "workbuddy", label: "WorkBuddy", path: "/" },
   { platform: "trae", label: "TRAE", path: "/trae", traeOnly: true },
-  { platform: "qoder", label: "Qoder", path: "/qoder", comingSoon: true },
+  { platform: "qoder", label: "Qoder", path: "/qoder" },
+  { platform: "zcode", label: "ZCode", path: "/zcode" },
   { platform: "lingxi", label: "灵犀", path: "/lingxi", comingSoon: true },
 ];
 
-function PlatformTabs({ current, traeEnabled }: { current: PlatformTab; traeEnabled: boolean }) {
+function PlatformTabs({ current, traeEnabled, avoidTitleBar }: { current: PlatformTab; traeEnabled: boolean; avoidTitleBar: boolean }) {
   const navigate = useNavigate();
   return (
-    <div
-      className="mb-3 grid grid-cols-2 gap-1 rounded-lg bg-foreground/[0.04] p-1"
+    <header
+      className={cn(
+        "flex h-11 shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar px-3",
+        avoidTitleBar && "mt-8",
+      )}
       role="tablist"
       aria-label="平台切换"
     >
@@ -232,7 +241,7 @@ function PlatformTabs({ current, traeEnabled }: { current: PlatformTab; traeEnab
             title={tab.comingSoon ? "即将上线" : undefined}
             onClick={() => navigate(tab.path)}
             className={cn(
-              "rounded-md px-2 py-1.5 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+              "rounded-md px-3 py-1.5 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
               active
                 ? "bg-background font-medium text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground",
@@ -243,7 +252,28 @@ function PlatformTabs({ current, traeEnabled }: { current: PlatformTab; traeEnab
           </button>
         );
       })}
-    </div>
+    </header>
+  );
+}
+
+/** 侧栏导航项（各平台域共用样式；`end` 用于前缀重叠的根路径）。 */
+function SideLink({ to, end, icon, label }: { to: string; end?: boolean; icon: ReactNode; label: string }) {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) =>
+        cn(
+          "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+          isActive
+            ? "bg-foreground/[0.06] font-medium text-foreground"
+            : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+        )
+      }
+    >
+      {icon}
+      {label}
+    </NavLink>
   );
 }
 
@@ -262,12 +292,18 @@ function Layout() {
   const showTraeNav =
     !demoModeEnabled && (!api.isDesktop() || navigator.userAgent.includes("Windows"));
 
-  // 当前平台域由路由推导:/trae* 属 TRAE 域,其余(含 /settings)属 WorkBuddy 域
+  // 当前平台域由路由推导:/trae* 属 TRAE 域、/qoder* 属 Qoder 域、/zcode* 属 ZCode 域,其余(含 /settings)属 WorkBuddy 域
   const { pathname } = useLocation();
-  const platform: PlatformTab = pathname.startsWith("/trae") ? "trae" : "workbuddy";
+  const platform: PlatformTab = pathname.startsWith("/trae")
+    ? "trae"
+    : pathname.startsWith("/qoder")
+      ? "qoder"
+      : pathname.startsWith("/zcode")
+        ? "zcode"
+        : "workbuddy";
 
   return (
-    <div className="flex h-screen min-h-0 overflow-hidden bg-background">
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
       {hasUnifiedTitleBar ? (
         <div
           data-tauri-drag-region
@@ -275,10 +311,13 @@ function Layout() {
           aria-hidden="true"
         />
       ) : null}
+      {/* 窗口最顶部:平台标签页(WorkBuddy / TRAE / Qoder / 灵犀 预留) */}
+      <PlatformTabs current={platform} traeEnabled={showTraeNav} avoidTitleBar={hasUnifiedTitleBar} />
+      <div className="flex min-h-0 flex-1">
       <aside
         className={cn(
           "flex min-h-0 w-[220px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 pb-4",
-          hasUnifiedTitleBar ? "pt-20" : "pt-4",
+          hasUnifiedTitleBar ? "pt-12" : "pt-4",
         )}
       >
         <div className="flex items-center gap-2.5 px-1 pb-5">
@@ -300,88 +339,31 @@ function Layout() {
             )}
           </div>
         </div>
-        <PlatformTabs current={platform} traeEnabled={showTraeNav} />
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5" aria-label="主导航">
           {platform === "workbuddy" ? (
             <>
-              <NavLink
-                to="/"
-                end
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                    isActive
-                      ? "bg-foreground/[0.06] font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-                  )
-                }
-              >
-                <User className="size-4" />
-                账号管理
-              </NavLink>
-              <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
-              <NavLink
-                to="/credit-stats"
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                    isActive
-                      ? "bg-foreground/[0.06] font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-                  )
-                }
-              >
-                <Sparkles className="size-4" />
-                积分统计
-              </NavLink>
+              <SideLink to="/" end icon={<User className="size-4" />} label="账号管理" />
+              <SideLink to="/token-stats" icon={<MessagesSquare className="size-4" />} label="Token 统计" />
+              <SideLink to="/credit-stats" icon={<Sparkles className="size-4" />} label="积分统计" />
+              <SideLink to="/settings" icon={<Settings className="size-4" />} label="设置" />
+            </>
+          ) : platform === "trae" ? (
+            <>
+              <SideLink to="/trae" end icon={<Rocket className="size-4" />} label="账号管理" />
+              <SideLink to="/trae/credits" icon={<Sparkles className="size-4" />} label="TRAE 积分" />
+              <SideLink to="/trae/settings" icon={<Settings className="size-4" />} label="设置" />
             </>
           ) : (
             <>
-              <NavLink
-                to="/trae"
-                end
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                    isActive
-                      ? "bg-foreground/[0.06] font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-                  )
-                }
-              >
-                <Rocket className="size-4" />
-                账号管理
-              </NavLink>
-              <NavLink
-                to="/trae/credits"
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                    isActive
-                      ? "bg-foreground/[0.06] font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-                  )
-                }
-              >
-                <Sparkles className="size-4" />
-                TRAE 积分
-              </NavLink>
+              {/* Qoder / ZCode 域同构:账号管理 + 设置(不做 Windows 门控,本机导入入口在弹窗内门控) */}
+              <SideLink to={platform === "qoder" ? "/qoder" : "/zcode"} end icon={<Rocket className="size-4" />} label="账号管理" />
+              <SideLink
+                to={platform === "qoder" ? "/qoder/settings" : "/zcode/settings"}
+                icon={<Settings className="size-4" />}
+                label="设置"
+              />
             </>
           )}
-          <NavLink
-            to="/settings"
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
-                isActive
-                  ? "bg-foreground/[0.06] font-medium text-foreground"
-                  : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-              )
-            }
-          >
-            <Settings className="size-4" />
-            设置
-          </NavLink>
         </nav>
         {api.isWebui() && !demoModeEnabled ? null : <UpdateCenter running={running} />}
       </aside>
@@ -393,6 +375,7 @@ function Layout() {
       >
         <Outlet />
       </main>
+      </div>
     </div>
   );
 }
@@ -410,6 +393,11 @@ export default function App() {
             <Route path="/token-stats" element={<TokenStatsPage />} />
             <Route path="/trae" element={<TraeAccountsPage />} />
             <Route path="/trae/credits" element={<TraeCreditsPage />} />
+            <Route path="/trae/settings" element={<TraeSettingsPage />} />
+            <Route path="/qoder" element={<QoderPage />} />
+            <Route path="/qoder/settings" element={<QoderSettingsPage />} />
+            <Route path="/zcode" element={<ZCodePage />} />
+            <Route path="/zcode/settings" element={<ZCodeSettingsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

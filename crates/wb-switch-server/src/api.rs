@@ -18,6 +18,8 @@ use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
+use credit_core::log::LogStore;
+use credit_core::store::{QoderState, ZcodeState, open_qoder_state, open_zcode_state};
 use trae_core::store::TraeState;
 use wb_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide, config,
@@ -303,6 +305,38 @@ pub fn router() -> Router {
         .route("/api/trae/credits/daily", get(api_trae_credits_daily))
         .route("/api/trae/open-url", post(api_trae_open_url))
         .route("/api/trae/migrate", post(api_trae_migrate))
+        // ---- Qoder(信用平台:活动领取制签到;核心逻辑在 credit-core)----
+        .route("/api/qoder/accounts", get(api_qoder_accounts))
+        .route("/api/qoder/accounts/import-local", post(api_qoder_import_local))
+        .route("/api/qoder/accounts/add", post(api_qoder_add_account))
+        .route("/api/qoder/accounts/update", post(api_qoder_update_account))
+        .route("/api/qoder/accounts/delete", post(api_qoder_delete_account))
+        .route("/api/qoder/checkin", post(api_qoder_checkin))
+        .route("/api/qoder/checkin-all", post(api_qoder_checkin_all))
+        .route("/api/qoder/quota", post(api_qoder_quota))
+        .route("/api/qoder/logs", get(api_qoder_logs))
+        .route("/api/qoder/logs/clear", post(api_qoder_clear_logs))
+        .route(
+            "/api/qoder/settings",
+            get(api_qoder_get_settings).post(api_qoder_save_settings),
+        )
+        .route("/api/qoder/next-run", get(api_qoder_next_run))
+        // ---- ZCode(信用平台:无签到,套餐/活动领取)----
+        .route("/api/zcode/accounts", get(api_zcode_accounts))
+        .route("/api/zcode/accounts/import-local", post(api_zcode_import_local))
+        .route("/api/zcode/accounts/add", post(api_zcode_add_account))
+        .route("/api/zcode/accounts/update", post(api_zcode_update_account))
+        .route("/api/zcode/accounts/delete", post(api_zcode_delete_account))
+        .route("/api/zcode/claim", post(api_zcode_claim))
+        .route("/api/zcode/claim-all", post(api_zcode_claim_all))
+        .route("/api/zcode/quota", post(api_zcode_quota))
+        .route("/api/zcode/logs", get(api_zcode_logs))
+        .route("/api/zcode/logs/clear", post(api_zcode_clear_logs))
+        .route(
+            "/api/zcode/settings",
+            get(api_zcode_get_settings).post(api_zcode_save_settings),
+        )
+        .route("/api/zcode/next-run", get(api_zcode_next_run))
         .fallback(static_handler)
 }
 
@@ -1681,4 +1715,652 @@ async fn api_trae_migrate() -> Response {
     let _ = std::fs::create_dir_all(&trae_dir);
     let report = trae_core::migrate::migrate_from_legacy(&trae_dir, None);
     json_ok(serde_json::to_value(report).unwrap_or(json!(null)))
+}
+
+// ---------------------------------------------------------------------------
+// Qoder / ZCode 信用平台(自 CreditDaddy 合并;核心逻辑在 credit-core;
+// 数据根 ~/.wb-switch/qoder/ 与 ~/.wb-switch/zcode/)
+// ---------------------------------------------------------------------------
+
+static QODER_STATE: OnceLock<QoderState> = OnceLock::new();
+static ZCODE_STATE: OnceLock<ZcodeState> = OnceLock::new();
+/// 两平台共用一个 Client(与 TRAE 同款共享模式)。
+static CREDIT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+/// 调度循环代数:设置变更后 +1,旧循环自行退出(同 TRAE_SCHED_GEN)。
+static CREDIT_SCHED_GEN: AtomicU64 = AtomicU64::new(0);
+/// 调度器记录的下次执行时刻(Unix 毫秒;None=未调度),供 next-run 查询。
+static CREDIT_NEXT_RUN_MS: Mutex<Option<i64>> = Mutex::new(None);
+
+pub fn qoder_state() -> &'static QoderState {
+    QODER_STATE.get_or_init(open_qoder_state)
+}
+
+pub fn zcode_state() -> &'static ZcodeState {
+    ZCODE_STATE.get_or_init(open_zcode_state)
+}
+
+fn credit_client() -> &'static reqwest::Client {
+    CREDIT_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+/// server 启动时初始化信用平台子系统:两个 state(自动建目录)+ 共享 Client,
+/// 按设置启动自动领取循环(由 main.rs spawn_background_loops 调用)。
+pub fn init_credit() {
+    credit_start_scheduler();
+}
+
+/// 信用平台自动领取调度(server 形态):一个循环覆盖两平台,与桌面端
+/// credit_scheduler 同语义——每轮 2h±10min 抖动(credit_core::schedule),
+/// generation 计数控制任务生命周期(旧任务自行退出),分段 sleep 15s
+/// 及时响应设置变更;无系统通知能力,结果降级为 stdout 日志。
+fn credit_start_scheduler() -> bool {
+    let gen = CREDIT_SCHED_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let qoder_auto = qoder_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled;
+    let zcode_auto = zcode_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled;
+    if !qoder_auto && !zcode_auto {
+        return true;
+    }
+    tokio::spawn(async move {
+        loop {
+            if CREDIT_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            let delay = credit_core::schedule::next_round_delay_default();
+            // 记录下次执行时刻,供 /api/{qoder,zcode}/next-run 查询
+            *CREDIT_NEXT_RUN_MS.lock().unwrap() =
+                Some(config::now_ms() + delay.as_millis() as i64);
+            // 分段 sleep,每 15s 检查 generation,及时响应设置变更
+            let mut remaining = delay;
+            while remaining > std::time::Duration::ZERO {
+                if CREDIT_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                    break;
+                }
+                let step = remaining.min(std::time::Duration::from_secs(15));
+                tokio::time::sleep(step).await;
+                remaining = remaining.saturating_sub(step);
+            }
+            if CREDIT_SCHED_GEN.load(Ordering::SeqCst) != gen {
+                break;
+            }
+            credit_run_round().await;
+        }
+    });
+    true
+}
+
+/// 一轮自动领取:Qoder checkin_all + ZCode claim_all(各自受平台自动开关约束;
+/// 无通知者,汇总打 stdout,失败明细走 eprintln)。
+async fn credit_run_round() {
+    let client = credit_client();
+    if qoder_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled
+    {
+        let results = credit_core::qoder::checkin::checkin_all(qoder_state(), client).await;
+        let ok = results.iter().filter(|(_, o)| o.outcome.is_success()).count();
+        println!("[Qoder] 自动领取完成: 成功 {ok}, 共 {}", results.len());
+        for (_, o) in &results {
+            if o.outcome == credit_core::models::ClaimOutcome::Failed {
+                eprintln!("[Qoder] 领取失败: {}", o.message);
+            }
+        }
+    }
+    if zcode_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled
+    {
+        let results = credit_core::zcode::claim::claim_all(zcode_state(), client).await;
+        let ok = results.iter().filter(|(_, o)| o.outcome.is_success()).count();
+        println!("[ZCode] 自动领取完成: 成功 {ok}, 共 {}", results.len());
+        for (_, o) in &results {
+            if o.outcome == credit_core::models::ClaimOutcome::Failed {
+                eprintln!("[ZCode] 领取失败: {}", o.message);
+            }
+        }
+    }
+}
+
+/// 命令结果序列化:AppResult<T> 成功回 JSON 值,失败回 {ok:false,error}(同 trae_json)。
+fn credit_json<T: serde::Serialize>(r: Result<T, credit_core::error::AppError>) -> Response {
+    match r {
+        Ok(v) => json_ok(serde_json::to_value(v).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+fn credit_missing(param: &str) -> Response {
+    json_err(format!("缺少 {param}"), StatusCode::BAD_REQUEST)
+}
+
+fn credit_not_found(id: &str) -> Response {
+    json_err(format!("账号不存在: {id}"), StatusCode::NOT_FOUND)
+}
+
+/// 调度器记录的下次执行时刻(RFC3339);自动领取关闭时视为未调度。
+fn credit_next_run_rfc3339() -> Option<String> {
+    let ms = (*CREDIT_NEXT_RUN_MS.lock().unwrap())?;
+    chrono::DateTime::from_timestamp_millis(ms).map(|dt| dt.to_rfc3339())
+}
+
+fn find_qoder_account(id: &str) -> Option<credit_core::models::QoderAccount> {
+    qoder_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_accounts()
+        .iter()
+        .find(|a| a.id == id)
+        .cloned()
+}
+
+fn find_zcode_account(id: &str) -> Option<credit_core::models::ZCodeAccount> {
+    zcode_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_accounts()
+        .iter()
+        .find(|a| a.id == id)
+        .cloned()
+}
+
+/// Qoder 领取结果序列化(QoderCheckinOutcome 未实现 Serialize)。
+fn qoder_outcome_json(id: &str, o: &credit_core::qoder::checkin::QoderCheckinOutcome) -> Value {
+    json!({
+        "id": id,
+        "outcome": o.outcome.as_str(),
+        "message": o.message,
+        "claimedAmount": o.claimed_amount,
+        "userId": o.uid,
+        "risk": o.risk,
+    })
+}
+
+/// ZCode 领取结果序列化(ZcodeClaimOutcome 未实现 Serialize)。
+fn zcode_outcome_json(id: &str, o: &credit_core::zcode::claim::ZcodeClaimOutcome) -> Value {
+    json!({
+        "id": id,
+        "outcome": o.outcome.as_str(),
+        "message": o.message,
+        "claims": o
+            .claims
+            .iter()
+            .map(|c| {
+                json!({
+                    "plan": c.plan,
+                    "ok": c.ok,
+                    "already": c.already,
+                    "needManual": c.need_manual,
+                    "via": c.via,
+                    "message": c.message,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+// ----- Qoder handlers -----
+
+async fn api_qoder_accounts() -> Response {
+    let data = qoder_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.get_accounts()).unwrap_or(json!([])))
+}
+
+async fn api_qoder_import_local() -> Response {
+    // DPAPI 解密本机客户端 auth.v1.dat 是阻塞 IO,放 blocking 线程
+    // (非 Windows 由 credit-core 返回空列表 + 错误说明,诚实降级)
+    let (locals, errors) = match tokio::task::spawn_blocking(
+        credit_core::qoder::identity::read_app_accounts,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let state = qoder_state();
+    let region = state.data.lock().unwrap().get_settings().region;
+    let now = config::now_ms();
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        for la in locals {
+            // 同 token 已存在:不重复导入
+            if data.get_accounts().iter().any(|a| a.token == la.token) {
+                skipped += 1;
+                continue;
+            }
+            let name = la
+                .user_name
+                .or_else(|| la.user_email.clone())
+                .unwrap_or(la.source);
+            data.accounts.push(credit_core::models::QoderAccount {
+                id: credit_core::store::generate_id(),
+                name,
+                token: la.token,
+                refresh_token: la.refresh_token,
+                user_id: la.user_id,
+                email: la.user_email,
+                region: region.clone(),
+                source: "local-app".into(),
+                expires_at: la.expires_at,
+                created_at: now,
+                enabled: true,
+                ..Default::default()
+            });
+            imported += 1;
+        }
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!({ "imported": imported, "skipped": skipped, "errors": errors })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_add_account(Json(body): Json<Value>) -> Response {
+    let token = match body_str(&body, "token") {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return credit_missing("token"),
+    };
+    let state = qoder_state();
+    // 区域缺省取设置里的"新账号默认区域"
+    let region = body_str(&body, "region")
+        .unwrap_or_else(|| state.data.lock().unwrap().get_settings().region);
+    let account = credit_core::models::QoderAccount {
+        id: credit_core::store::generate_id(),
+        name: body_str(&body, "name").unwrap_or_else(|| "Qoder 账号".into()),
+        token: token.trim().into(),
+        region,
+        source: "manual".into(),
+        created_at: config::now_ms(),
+        enabled: body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        ..Default::default()
+    };
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.accounts.push(account.clone());
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(serde_json::to_value(account).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_update_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    // 兼容两种形态:{id, updates:{...}} 或把更新字段直接平铺在 body 里
+    let updates = body.get("updates").cloned().unwrap_or_else(|| body.clone());
+    let state = qoder_state();
+    let mut data = state.data.lock().unwrap();
+    let Some(acc) = data.update_account(&id, updates) else {
+        return credit_not_found(&id);
+    };
+    match data.save(&state.store_file()).map(|_| acc) {
+        Ok(acc) => json_ok(serde_json::to_value(acc).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_delete_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let state = qoder_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        if data.get_accounts().iter().all(|a| a.id != id) {
+            return credit_not_found(&id);
+        }
+        data.delete_account(&id);
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_checkin(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let Some(acc) = find_qoder_account(&id) else {
+        return credit_not_found(&id);
+    };
+    let o = credit_core::qoder::checkin::checkin_one(qoder_state(), credit_client(), &acc).await;
+    json_ok(qoder_outcome_json(&id, &o))
+}
+
+async fn api_qoder_checkin_all() -> Response {
+    let results = credit_core::qoder::checkin::checkin_all(qoder_state(), credit_client()).await;
+    json_ok(Value::Array(
+        results
+            .iter()
+            .map(|(id, o)| qoder_outcome_json(id, o))
+            .collect(),
+    ))
+}
+
+async fn api_qoder_quota(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let Some(acc) = find_qoder_account(&id) else {
+        return credit_not_found(&id);
+    };
+    credit_json(
+        credit_core::qoder::checkin::refresh_quota(qoder_state(), credit_client(), &acc).await,
+    )
+}
+
+async fn api_qoder_logs(RawQuery(query): RawQuery) -> Response {
+    let limit = query
+        .as_deref()
+        .and_then(|q| {
+            q.split('&').find_map(|p| p.split_once('=')).and_then(|(k, v)| {
+                (k == "limit").then_some(v).and_then(|v| v.parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(100);
+    let data = qoder_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.list_logs(limit)).unwrap_or(json!([])))
+}
+
+async fn api_qoder_clear_logs() -> Response {
+    let state = qoder_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.clear_logs();
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!(true)),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_get_settings() -> Response {
+    let s = qoder_state().data.lock().unwrap().get_settings();
+    json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+}
+
+async fn api_qoder_save_settings(Json(body): Json<Value>) -> Response {
+    // 前端发送 {settings: partial};兼容直接平铺的 partial
+    let payload = body.get("settings").cloned().unwrap_or(body);
+    let partial: credit_core::models::PartialSettings = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => return json_err(format!("设置格式错误: {e}"), StatusCode::BAD_REQUEST),
+    };
+    let state = qoder_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        let s = data.save_settings(partial);
+        data.save(&state.store_file()).map(|_| s)
+    };
+    match r {
+        Ok(s) => {
+            // 设置变更后重启自动领取调度(与桌面端同语义)
+            credit_start_scheduler();
+            json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_qoder_next_run() -> Response {
+    let auto = qoder_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled;
+    let next = if auto { credit_next_run_rfc3339() } else { None };
+    json_ok(json!(next))
+}
+
+// ----- ZCode handlers -----
+
+async fn api_zcode_accounts() -> Response {
+    let data = zcode_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.get_accounts()).unwrap_or(json!([])))
+}
+
+async fn api_zcode_import_local() -> Response {
+    // 读本机 ~/.zcode/v2 凭据 + 解密身份是阻塞 IO,放 blocking 线程
+    let snapshot =
+        match tokio::task::spawn_blocking(credit_core::zcode::credentials::read_local_snapshot)
+            .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return json_err(e.to_string(), StatusCode::BAD_REQUEST),
+            Err(e) => return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+        };
+    let hash = credit_core::zcode::credentials::canonical_hash(&snapshot.creds);
+    let state = zcode_state();
+    let account = credit_core::models::ZCodeAccount {
+        id: credit_core::store::generate_id(),
+        name: snapshot.label.clone(),
+        // 本机导入:token 存可读标记,真实凭据在 credentials 快照
+        token: format!(
+            "zcode-creds:{}",
+            snapshot.identity.user_id.clone().unwrap_or_default()
+        ),
+        user_id: snapshot.identity.user_id.clone(),
+        email: snapshot.identity.email.clone(),
+        region: "intl".into(),
+        source: "local-app".into(),
+        created_at: config::now_ms(),
+        credentials: Some(snapshot.creds.clone()),
+        config: snapshot.config.clone(),
+        device_mid: snapshot.device_mid.clone(),
+        canonical_hash: Some(hash.clone()),
+        enabled: true,
+        ..Default::default()
+    };
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        // 同一登录(canonical_hash 一致)不重复导入
+        if data
+            .get_accounts()
+            .iter()
+            .any(|a| a.canonical_hash.as_deref() == Some(hash.as_str()))
+        {
+            return json_ok(json!({ "imported": 0, "skipped": 1, "errors": [] }));
+        }
+        data.accounts.push(account);
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!({ "imported": 1, "skipped": 0, "errors": [] })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_add_account(Json(body): Json<Value>) -> Response {
+    let token = match body_str(&body, "token") {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return credit_missing("token"),
+    };
+    let account = credit_core::models::ZCodeAccount {
+        id: credit_core::store::generate_id(),
+        name: body_str(&body, "name").unwrap_or_else(|| "ZCode 账号".into()),
+        token: token.trim().into(),
+        region: "intl".into(),
+        source: "manual".into(),
+        created_at: config::now_ms(),
+        enabled: body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        ..Default::default()
+    };
+    let state = zcode_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.accounts.push(account.clone());
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(serde_json::to_value(account).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_update_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    // 兼容两种形态:{id, updates:{...}} 或把更新字段直接平铺在 body 里
+    let updates = body.get("updates").cloned().unwrap_or_else(|| body.clone());
+    let state = zcode_state();
+    let mut data = state.data.lock().unwrap();
+    let Some(acc) = data.update_account(&id, updates) else {
+        return credit_not_found(&id);
+    };
+    match data.save(&state.store_file()).map(|_| acc) {
+        Ok(acc) => json_ok(serde_json::to_value(acc).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_delete_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let state = zcode_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        if data.get_accounts().iter().all(|a| a.id != id) {
+            return credit_not_found(&id);
+        }
+        data.delete_account(&id);
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_claim(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let Some(acc) = find_zcode_account(&id) else {
+        return credit_not_found(&id);
+    };
+    // None = preview 为空或查询失败(协议口径:无事可做)
+    match credit_core::zcode::claim::claim_one(zcode_state(), credit_client(), &acc).await {
+        Some(o) => json_ok(zcode_outcome_json(&id, &o)),
+        None => json_ok(json!({
+            "id": id,
+            "outcome": "no-activity",
+            "message": "当前无可领取的活动",
+            "claims": [],
+        })),
+    }
+}
+
+async fn api_zcode_claim_all() -> Response {
+    let results = credit_core::zcode::claim::claim_all(zcode_state(), credit_client()).await;
+    json_ok(Value::Array(
+        results
+            .iter()
+            .map(|(id, o)| zcode_outcome_json(id, o))
+            .collect(),
+    ))
+}
+
+async fn api_zcode_quota(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let Some(acc) = find_zcode_account(&id) else {
+        return credit_not_found(&id);
+    };
+    credit_json(
+        credit_core::zcode::claim::refresh_quota(zcode_state(), credit_client(), &acc).await,
+    )
+}
+
+async fn api_zcode_logs(RawQuery(query): RawQuery) -> Response {
+    let limit = query
+        .as_deref()
+        .and_then(|q| {
+            q.split('&').find_map(|p| p.split_once('=')).and_then(|(k, v)| {
+                (k == "limit").then_some(v).and_then(|v| v.parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(100);
+    let data = zcode_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.list_logs(limit)).unwrap_or(json!([])))
+}
+
+async fn api_zcode_clear_logs() -> Response {
+    let state = zcode_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.clear_logs();
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!(true)),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_get_settings() -> Response {
+    let s = zcode_state().data.lock().unwrap().get_settings();
+    json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+}
+
+async fn api_zcode_save_settings(Json(body): Json<Value>) -> Response {
+    // 前端发送 {settings: partial};兼容直接平铺的 partial
+    let payload = body.get("settings").cloned().unwrap_or(body);
+    let partial: credit_core::models::PartialSettings = match serde_json::from_value(payload) {
+        Ok(p) => p,
+        Err(e) => return json_err(format!("设置格式错误: {e}"), StatusCode::BAD_REQUEST),
+    };
+    let state = zcode_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        let s = data.save_settings(partial);
+        data.save(&state.store_file()).map(|_| s)
+    };
+    match r {
+        Ok(s) => {
+            // 设置变更后重启自动领取调度(与桌面端同语义)
+            credit_start_scheduler();
+            json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_zcode_next_run() -> Response {
+    let auto = zcode_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_settings()
+        .auto_claim_enabled;
+    let next = if auto { credit_next_run_rfc3339() } else { None };
+    json_ok(json!(next))
 }

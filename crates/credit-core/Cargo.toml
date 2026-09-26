@@ -1,0 +1,26 @@
+[package]
+name = "credit-core"
+version = "0.1.0"
+edition = "2021"
+description = "Qoder / ZCode 签到与活动领取核心逻辑（移植自 CreditDaddy），不依赖 Tauri，可被桌面端与 HTTP server 复用"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+base64 = "0.22"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+dirs = "5"
+hostname = "0.4"
+# ZCode credentials.json 的 enc:v1 为 AES-256-GCM(SHA256 派生密钥)
+aes-gcm = "0.10"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "deflate"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# 与 trae-core 统一 windows crate 版本，避免依赖图两份 windows。
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+winreg = "0.52"

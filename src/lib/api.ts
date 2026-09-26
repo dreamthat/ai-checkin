@@ -52,6 +52,16 @@ import type {
   TraeMigrationReport,
   TraePointsResult,
   TraeSettings,
+  CreditLogEntry,
+  CreditRegion,
+  QoderAccount,
+  QoderCheckinAllResult,
+  QoderCheckinResult,
+  QoderSettings,
+  ZcodeAccount,
+  ZcodeClaimAllResult,
+  ZcodeClaimResult,
+  ZcodeSettings,
 } from "./types";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled } from "./demo-mode";
 import { screenshotDemoResponse } from "./screenshot-demo";
@@ -201,6 +211,34 @@ const ROUTES: Record<string, Route> = {
   trae_credits_daily_list: { method: "GET", path: "/api/trae/credits/daily" },
   trae_open_url: { method: "POST", path: "/api/trae/open-url" },
   trae_migrate_legacy_data: { method: "POST", path: "/api/trae/migrate" },
+  // Qoder 领取子系统（creditdaddy 合并；与 src-tauri/src/qoder_commands.rs 一一对应）
+  qoder_get_accounts: { method: "GET", path: "/api/qoder/accounts" },
+  qoder_import_local: { method: "POST", path: "/api/qoder/accounts/import-local" },
+  qoder_add_account: { method: "POST", path: "/api/qoder/accounts/add" },
+  qoder_update_account: { method: "POST", path: "/api/qoder/accounts/update" },
+  qoder_delete_account: { method: "POST", path: "/api/qoder/accounts/delete" },
+  qoder_checkin_account: { method: "POST", path: "/api/qoder/checkin" },
+  qoder_checkin_all: { method: "POST", path: "/api/qoder/checkin-all" },
+  qoder_get_account_quota: { method: "POST", path: "/api/qoder/quota" },
+  qoder_get_logs: { method: "GET", path: "/api/qoder/logs" },
+  qoder_clear_logs: { method: "POST", path: "/api/qoder/logs/clear" },
+  qoder_get_settings: { method: "GET", path: "/api/qoder/settings" },
+  qoder_save_settings: { method: "POST", path: "/api/qoder/settings" },
+  qoder_get_next_run_time: { method: "GET", path: "/api/qoder/next-run" },
+  // ZCode 领取子系统（与 Qoder 同形；checkin → claim）
+  zcode_get_accounts: { method: "GET", path: "/api/zcode/accounts" },
+  zcode_import_local: { method: "POST", path: "/api/zcode/accounts/import-local" },
+  zcode_add_account: { method: "POST", path: "/api/zcode/accounts/add" },
+  zcode_update_account: { method: "POST", path: "/api/zcode/accounts/update" },
+  zcode_delete_account: { method: "POST", path: "/api/zcode/accounts/delete" },
+  zcode_claim_account: { method: "POST", path: "/api/zcode/claim" },
+  zcode_claim_all: { method: "POST", path: "/api/zcode/claim-all" },
+  zcode_get_account_quota: { method: "POST", path: "/api/zcode/quota" },
+  zcode_get_logs: { method: "GET", path: "/api/zcode/logs" },
+  zcode_clear_logs: { method: "POST", path: "/api/zcode/logs/clear" },
+  zcode_get_settings: { method: "GET", path: "/api/zcode/settings" },
+  zcode_save_settings: { method: "POST", path: "/api/zcode/settings" },
+  zcode_get_next_run_time: { method: "GET", path: "/api/zcode/next-run" },
 };
 
 /**
@@ -1052,4 +1090,143 @@ export function traeOpenUrl(url: string): Promise<void> {
 /** 手动触发旧 TraeMate 数据迁移（幂等，返回报告）。 */
 export function traeMigrateLegacyData(): Promise<TraeMigrationReport> {
   return call("trae_migrate_legacy_data");
+}
+
+// ---------------------------------------------------------------------------
+// Qoder 领取子系统（creditdaddy 合并）：13 个命令的 call 包装。
+// 参数命名同 TRAE：两端统一 camelCase（saveSettings 走 { settings: partial }）。
+// ---------------------------------------------------------------------------
+
+/** Qoder 账号列表（含额度缓存 / 上次领取结果 / 冷却等展示态）。 */
+export function qoderGetAccounts(): Promise<QoderAccount[]> {
+  return call("qoder_get_accounts");
+}
+
+/** 导入本机 Qoder 客户端 / IDE 数据目录中检测到的账号（仅桌面 Windows）。 */
+export function qoderImportLocal(): Promise<QoderAccount[]> {
+  return call("qoder_import_local");
+}
+
+/** 手动录入 token 账号（region："intl" 国际版 | "cn" 国内版）。 */
+export function qoderAddAccount(name: string, token: string, region: CreditRegion): Promise<QoderAccount> {
+  return call("qoder_add_account", { name, token, region });
+}
+
+/** 更新账号字段（name / enabled / region 等，后端按需合并写回）。 */
+export function qoderUpdateAccount(id: string, updates: Partial<QoderAccount>): Promise<QoderAccount> {
+  return call("qoder_update_account", { id, updates });
+}
+
+/** 删除账号。 */
+export function qoderDeleteAccount(id: string): Promise<boolean> {
+  return call("qoder_delete_account", { id });
+}
+
+/** 单账号领取（拉活动列表 → 领取全部可领活动）。 */
+export function qoderCheckinAccount(id: string): Promise<QoderCheckinResult> {
+  return call("qoder_checkin_account", { id });
+}
+
+/** 一键领取全部启用账号，返回 [账号ID, 结果] 对。 */
+export function qoderCheckinAll(): Promise<QoderCheckinAllResult> {
+  return call("qoder_checkin_all");
+}
+
+/** 刷新账号额度（/api/v2/quota/usage，写缓存，返回原始 JSON）。 */
+export function qoderGetAccountQuota(id: string): Promise<unknown> {
+  return call("qoder_get_account_quota", { id });
+}
+
+/** 领取日志（新的在前）。 */
+export function qoderGetLogs(limit?: number): Promise<CreditLogEntry[]> {
+  return call("qoder_get_logs", limit ? { limit } : undefined);
+}
+
+/** 清空领取日志。 */
+export function qoderClearLogs(): Promise<boolean> {
+  return call("qoder_clear_logs");
+}
+
+/** Qoder 设置。 */
+export function qoderGetSettings(): Promise<QoderSettings> {
+  return call("qoder_get_settings");
+}
+
+/** 保存设置（partial；保存后后端会按 autoClaimEnabled 重启定时轮）。 */
+export function qoderSaveSettings(partial: Partial<QoderSettings>): Promise<QoderSettings> {
+  return call("qoder_save_settings", { settings: partial });
+}
+
+/** 下次定时领取时间（ISO 字符串；未启用为 null）。 */
+export function qoderGetNextRunTime(): Promise<string | null> {
+  return call("qoder_get_next_run_time");
+}
+
+// ---------------------------------------------------------------------------
+// ZCode 领取子系统：与 Qoder 同形（checkin → claim；ZCode 无验证码提供者时降级 need-captcha）
+// ---------------------------------------------------------------------------
+
+/** ZCode 账号列表。 */
+export function zcodeGetAccounts(): Promise<ZcodeAccount[]> {
+  return call("zcode_get_accounts");
+}
+
+/** 导入本机 ~/.zcode 凭据中的账号（仅桌面 Windows）。 */
+export function zcodeImportLocal(): Promise<ZcodeAccount[]> {
+  return call("zcode_import_local");
+}
+
+/** 手动录入 token 账号。 */
+export function zcodeAddAccount(name: string, token: string): Promise<ZcodeAccount> {
+  return call("zcode_add_account", { name, token });
+}
+
+/** 更新账号字段。 */
+export function zcodeUpdateAccount(id: string, updates: Partial<ZcodeAccount>): Promise<ZcodeAccount> {
+  return call("zcode_update_account", { id, updates });
+}
+
+/** 删除账号。 */
+export function zcodeDeleteAccount(id: string): Promise<boolean> {
+  return call("zcode_delete_account", { id });
+}
+
+/** 单账号领取（查可领套餐 → 逐个 claim；需验证码时诚实降级 need-captcha）。 */
+export function zcodeClaimAccount(id: string): Promise<ZcodeClaimResult> {
+  return call("zcode_claim_account", { id });
+}
+
+/** 一键领取全部启用账号，返回 [账号ID, 结果] 对。 */
+export function zcodeClaimAll(): Promise<ZcodeClaimAllResult> {
+  return call("zcode_claim_all");
+}
+
+/** 刷新账号额度（写缓存，返回 QuotaSnapshot JSON）。 */
+export function zcodeGetAccountQuota(id: string): Promise<unknown> {
+  return call("zcode_get_account_quota", { id });
+}
+
+/** 领取日志（新的在前）。 */
+export function zcodeGetLogs(limit?: number): Promise<CreditLogEntry[]> {
+  return call("zcode_get_logs", limit ? { limit } : undefined);
+}
+
+/** 清空领取日志。 */
+export function zcodeClearLogs(): Promise<boolean> {
+  return call("zcode_clear_logs");
+}
+
+/** ZCode 设置。 */
+export function zcodeGetSettings(): Promise<ZcodeSettings> {
+  return call("zcode_get_settings");
+}
+
+/** 保存设置（partial）。 */
+export function zcodeSaveSettings(partial: Partial<ZcodeSettings>): Promise<ZcodeSettings> {
+  return call("zcode_save_settings", { settings: partial });
+}
+
+/** 下次定时领取时间（ISO 字符串；未启用为 null）。 */
+export function zcodeGetNextRunTime(): Promise<string | null> {
+  return call("zcode_get_next_run_time");
 }

@@ -1,13 +1,16 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
 mod companion;
+mod credit_scheduler;
 #[cfg(target_os = "macos")]
 mod instance_lock;
 #[cfg(desktop)]
 mod tray;
+mod qoder_commands;
 mod trae_commands;
 mod trae_scheduler;
 mod update_service;
+mod zcode_commands;
 
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -117,6 +120,11 @@ fn spawn_background_loops(app: tauri::AppHandle) {
     // 未开启 auto_checkin 时内部直接返回，设置变更经 trae_save_settings 重启调度。
     trae_scheduler::start_scheduler(app.clone());
 
+    // Qoder/ZCode 信用平台：单循环覆盖两平台（2h±10min 抖动，Qoder 领取 + ZCode 领取同轮）。
+    // 与 workbuddy / TRAE 循环语义均不同，独立成环互不影响；两平台都未开启自动领取时
+    // 内部直接返回，设置变更经 qoder/zcode_save_settings 重启调度。
+    credit_scheduler::start_scheduler(app.clone());
+
     // 限额 hook 信号：轮询 `~/.wb-switch/hook-events.jsonl`（CLI / WorkBuddy 的 429 当轮
     // 由客户端 hook 追加），入账后通知前端立即拉取。轻量模式下窗口销毁但进程仍在，
     // 状态由后端持有（见 `rate_limit_events.rs`）。
@@ -211,6 +219,18 @@ pub fn run() {
                     }
                 );
             }
+            // Qoder/ZCode 信用平台子系统：数据根 ~/.wb-switch/{qoder,zcode}/（core 内自建目录），
+            // 各持 core 存储状态 + 独立 HTTP 客户端；调度器状态含 generation 与下次执行时刻。
+            // 与 workbuddy / TRAE 状态完全独立（不同产品平台，零功能重叠）。
+            app.manage(qoder_commands::QoderState {
+                core: credit_core::store::open_qoder_state(),
+                client: reqwest::Client::new(),
+            });
+            app.manage(zcode_commands::ZcodeState {
+                core: credit_core::store::open_zcode_state(),
+                client: reqwest::Client::new(),
+            });
+            app.manage(credit_scheduler::CreditSchedulerState::default());
             // README 截图模式只渲染前端虚构数据，禁止读取账号后执行签到、轮换或保活。
             if !is_screenshot_demo() {
                 spawn_background_loops(app.handle().clone());
@@ -324,6 +344,33 @@ pub fn run() {
             trae_commands::trae_credits_daily_list,
             trae_commands::trae_open_url,
             trae_commands::trae_migrate_legacy_data,
+            // Qoder/ZCode 信用平台（签到/领取，见 qoder_commands.rs / zcode_commands.rs / credit_scheduler.rs）
+            qoder_commands::qoder_get_accounts,
+            qoder_commands::qoder_import_local,
+            qoder_commands::qoder_add_account,
+            qoder_commands::qoder_update_account,
+            qoder_commands::qoder_delete_account,
+            qoder_commands::qoder_checkin_account,
+            qoder_commands::qoder_checkin_all,
+            qoder_commands::qoder_get_account_quota,
+            qoder_commands::qoder_get_logs,
+            qoder_commands::qoder_clear_logs,
+            qoder_commands::qoder_get_settings,
+            qoder_commands::qoder_save_settings,
+            qoder_commands::qoder_get_next_run_time,
+            zcode_commands::zcode_get_accounts,
+            zcode_commands::zcode_import_local,
+            zcode_commands::zcode_add_account,
+            zcode_commands::zcode_update_account,
+            zcode_commands::zcode_delete_account,
+            zcode_commands::zcode_claim_account,
+            zcode_commands::zcode_claim_all,
+            zcode_commands::zcode_get_account_quota,
+            zcode_commands::zcode_get_logs,
+            zcode_commands::zcode_clear_logs,
+            zcode_commands::zcode_get_settings,
+            zcode_commands::zcode_save_settings,
+            zcode_commands::zcode_get_next_run_time,
             companion::get_companion_enabled,
             companion::set_companion_enabled,
             companion::open_companion_settings,

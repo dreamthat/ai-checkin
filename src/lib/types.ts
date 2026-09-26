@@ -972,3 +972,157 @@ export interface VscodeSessionList {
   dataRoot?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Qoder / ZCode 领取子系统（creditdaddy 合并）：与 crates/credit-core/src/models.rs serde camelCase 对齐
+// ---------------------------------------------------------------------------
+
+/** 领取/签到结果（协议口径，与 CreditDaddy checkinOne/zcodeAutoClaim 一致）。 */
+export type ClaimOutcome =
+  | "checked-in"
+  | "already"
+  | "no-activity"
+  | "failed"
+  | "need-captcha";
+
+/** Qoder 区域：intl = 国际版，cn = 国内版。 */
+export type CreditRegion = "cn" | "intl";
+
+/**
+ * Qoder 额度缓存（/api/v2/quota/usage 原始 JSON，credit-core 存为 Value）。
+ * 常用字段：userQuota / addOnQuota / orgResourcePackage 各含 total/used/remaining。
+ */
+export interface QoderQuotaUsage {
+  userQuota?: { total?: number; used?: number; remaining?: number } | null;
+  addOnQuota?: { total?: number; used?: number; remaining?: number } | null;
+  orgResourcePackage?: { total?: number; used?: number; remaining?: number } | null;
+  isQuotaExceeded?: boolean;
+  [key: string]: unknown;
+}
+
+/** Qoder 账号（credit-core QoderAccount；字段缺失容忍旧数据）。 */
+export interface QoderAccount {
+  id: string;
+  name: string;
+  token: string;
+  refreshToken?: string | null;
+  /** 首次领取后从 campaigns 响应回写。 */
+  userId?: string | null;
+  email?: string | null;
+  region: CreditRegion;
+  enabled: boolean;
+  createdAt?: number;
+  /** 凭据过期时间（ISO 字符串，本机客户端导入时携带）。 */
+  expiresAt?: string | null;
+  /** "manual" 手动录入 | "local-app" 本机导入 | "device" 浏览器授权。 */
+  source?: string;
+  lastClaimAt?: number | null;
+  lastResult?: ClaimOutcome | string | null;
+  lastMessage?: string | null;
+  lastClaimedAmount?: number | null;
+  /** 额度查询原始 JSON 缓存（见 QoderQuotaUsage）。 */
+  quota?: QoderQuotaUsage | null;
+  quotaUpdatedAt?: number | null;
+  /** 冷却截止（Unix 毫秒；null = 不在冷却）。 */
+  cooldownUntil?: number | null;
+  cooldownReason?: string | null;
+}
+
+/** ZCode 账号（credit-core ZCodeAccount；region 为预留字段，固定 intl）。 */
+export interface ZcodeAccount {
+  id: string;
+  name: string;
+  /** 手动录入为直接 token；本机导入为标记 "zcode-creds:<uid>"（真实凭据在 credentials 快照）。 */
+  token: string;
+  refreshToken?: string | null;
+  userId?: string | null;
+  email?: string | null;
+  region?: string;
+  enabled: boolean;
+  createdAt?: number;
+  source?: string;
+  lastClaimAt?: number | null;
+  lastResult?: ClaimOutcome | string | null;
+  lastMessage?: string | null;
+  lastClaimedAmount?: number | null;
+  /** QuotaSnapshot JSON 缓存（见 ZcodeQuotaSnapshot）。 */
+  quota?: ZcodeQuotaSnapshot | null;
+  quotaUpdatedAt?: number | null;
+  cooldownUntil?: number | null;
+  cooldownReason?: string | null;
+  /** 本机导入的 credentials.json 快照（各字段保持 enc:v1 密文）。 */
+  credentials?: unknown;
+  config?: unknown;
+  deviceMid?: string | null;
+  canonicalHash?: string | null;
+}
+
+/** ZCode 统一额度快照（credit-core zcode::client::QuotaSnapshot）。 */
+export interface ZcodeQuotaSnapshot {
+  /** "bigmodel" | "zcode.z.ai" | "" */
+  source: string;
+  total: number;
+  used: number;
+  remaining: number;
+  unit: string;
+  plan?: string | null;
+  planExpiresAt?: string | null;
+  parts: {
+    name: string;
+    /** 次 / 分钟 / Token；空串表示纯数值。 */
+    unit: string;
+    total: number;
+    used: number;
+    remaining: number;
+    expiresAt?: string | null;
+  }[];
+  empty: boolean;
+}
+
+/** Qoder 设置（intervalMin 最短 30，由后端钳制）。 */
+export interface QoderSettings {
+  autoClaimEnabled: boolean;
+  intervalMin: number;
+  /** 新账号默认区域。 */
+  region: CreditRegion;
+}
+
+/** ZCode 设置。 */
+export interface ZcodeSettings {
+  autoClaimEnabled: boolean;
+  intervalMin: number;
+}
+
+/** 领取/签到日志（credit-core LogEntry；后端已按新的在前排序）。 */
+export interface CreditLogEntry {
+  time: number;
+  /** "qoder" | "zcode" */
+  platform: string;
+  accountId: string;
+  accountName: string;
+  /** ClaimOutcome 字符串（容忍后端扩展）。 */
+  result: string;
+  message: string;
+}
+
+/** Qoder 单账号领取结果（credit-core QoderCheckinOutcome）。 */
+export interface QoderCheckinResult {
+  outcome: ClaimOutcome | string;
+  message: string;
+  /** 本次领取到的 Credits 总额。 */
+  claimedAmount?: number;
+  uid?: string | null;
+  /** 本次是否用上了设备风控身份。 */
+  risk?: boolean;
+}
+
+/** ZCode 单账号领取结果（credit-core ZcodeClaimOutcome）。 */
+export interface ZcodeClaimResult {
+  outcome: ClaimOutcome | string;
+  message: string;
+  claims?: unknown[];
+}
+
+/** 一键领取返回的 [账号ID, 结果] 对（与 trae_checkin_all 同形）。 */
+export type QoderCheckinAllResult = [string, QoderCheckinResult][];
+export type ZcodeClaimAllResult = [string, ZcodeClaimResult][];
+

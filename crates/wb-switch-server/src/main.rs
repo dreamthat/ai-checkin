@@ -27,6 +27,11 @@ fn spawn_background_loops() {
     // (调度循环在 api.rs,与 webui 路由共用 TraeState/reqwest Client)
     api::init_trae();
 
+    // 信用平台(Qoder/ZCode)子系统初始化:两个 state + 共享 reqwest Client +
+    // 自动领取循环(2h±10min 一轮;循环在 api.rs,与 webui 路由共用状态;
+    // 无 Tauri AppHandle,通知降级为 stdout/eprintln 日志)
+    api::init_credit();
+
     tokio::spawn(async move {
         if let Err(error) = config::compact_checkin_logs() {
             eprintln!("[签到] 历史日志整理失败: {error}");
