@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use serde::de::DeserializeOwned;
 
 use crate::error::{AppError, AppResult};
+use crate::lingxi::{LingxiAccount, LingxiSettings};
 use crate::log::LogEntry;
 use crate::models::{
     CreditSettings, PartialSettings, QoderAccount, QoderSettings, ZCodeAccount, ZcodeSettings,
@@ -151,9 +152,11 @@ fn account_id<A: serde::Serialize>(a: &A) -> String {
 
 pub type QoderState = CreditState<QoderAccount, QoderSettings>;
 pub type ZcodeState = CreditState<ZCodeAccount, ZcodeSettings>;
+pub type LingxiState = CreditState<LingxiAccount, LingxiSettings>;
 
 pub const QODER_STORE_NAME: &str = "qoder-store.json";
 pub const ZCODE_STORE_NAME: &str = "zcode-store.json";
+pub const LINGXI_STORE_NAME: &str = "lingxi-store.json";
 
 /// 默认数据根:~/.wb-switch/{platform}/
 pub fn default_base_dir(platform_dir: &str) -> PathBuf {
@@ -187,6 +190,21 @@ pub fn open_zcode_state() -> ZcodeState {
 /// 打开指定目录的 ZCode 状态(测试/自定义宿主用)。
 pub fn open_zcode_state_at(base_dir: PathBuf) -> ZcodeState {
     ZcodeState::new(base_dir, ZCODE_STORE_NAME)
+}
+
+/// 灵犀数据根:~/.wb-switch/lingxi/
+pub fn lingxi_base_dir() -> PathBuf {
+    default_base_dir("lingxi")
+}
+
+/// 打开默认位置的灵犀状态(~/.wb-switch/lingxi/)。
+pub fn open_lingxi_state() -> LingxiState {
+    LingxiState::new(lingxi_base_dir(), LINGXI_STORE_NAME)
+}
+
+/// 打开指定目录的灵犀状态(测试/自定义宿主用)。
+pub fn open_lingxi_state_at(base_dir: PathBuf) -> LingxiState {
+    LingxiState::new(base_dir, LINGXI_STORE_NAME)
 }
 
 /// 生成简单唯一 ID(同 trae-core:毫秒时间戳 + 进程内计数)。

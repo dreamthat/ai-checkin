@@ -1126,3 +1126,50 @@ export interface ZcodeClaimResult {
 export type QoderCheckinAllResult = [string, QoderCheckinResult][];
 export type ZcodeClaimAllResult = [string, ZcodeClaimResult][];
 
+// ---------------------------------------------------------------------------
+// 灵犀签到子系统（金山 Lingxi）：与 crates/credit-core/src/lingxi/mod.rs serde camelCase 对齐。
+// checkinUrl 与 Cookie 均由用户从浏览器 F12 抓包手动获取，无本地凭据检测。
+// ---------------------------------------------------------------------------
+
+/** 灵犀签到结果口径（credit-core lingxi::Outcome；unknown 表示响应文本无法判定，稍后重试）。 */
+export type LingxiOutcome = "success" | "already" | "unknown" | "failed" | "skipped";
+
+/** 灵犀账号（credit-core LingxiAccount；字段缺失容忍旧数据）。 */
+export interface LingxiAccount {
+  id: string;
+  name: string;
+  /** 签到接口地址（浏览器 F12 抓包获取，每账号独立）。 */
+  checkinUrl: string;
+  /** 签到请求的 Cookie 请求头（与 checkinUrl 同源抓包）。 */
+  cookie: string;
+  enabled: boolean;
+  createdAt?: number;
+  lastCheckinAt?: number | null;
+  lastResult?: LingxiOutcome | string | null;
+  lastMessage?: string | null;
+  /** 最近成功签到日期 YYYY-MM-DD（Asia/Shanghai），当日幂等跳过依据。 */
+  lastSuccessDate?: string | null;
+}
+
+/** 灵犀设置（checkinTimes 为每日定点 HH:MM 列表，Asia/Shanghai；列表为空即不调度）。 */
+export interface LingxiSettings {
+  checkinTimes: string[];
+  notifyOnSuccess: boolean;
+  notifyOnFailed: boolean;
+}
+
+/** 灵犀单账号签到结果（credit-core LingxiCheckinOutcome）。 */
+export interface LingxiCheckinResult {
+  outcome: LingxiOutcome | string;
+  message: string;
+}
+
+/** 一键签到返回项：桌面端键名 accountId / webui 键名 id（outcome/message 相同）。 */
+export interface LingxiCheckinAllItem extends LingxiCheckinResult {
+  accountId?: string;
+  id?: string;
+}
+
+/** 一键签到返回（全部启用账号；当日已成功 → skipped）。 */
+export type LingxiCheckinAllResult = LingxiCheckinAllItem[];
+

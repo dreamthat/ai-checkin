@@ -845,6 +845,7 @@ dependencies = [
  "hostname",
  "rand 0.8.8",
  "reqwest 0.12.28",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",

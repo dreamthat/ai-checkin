@@ -18,8 +18,10 @@ use axum::{Json, Router};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
+use chrono::{Datelike, TimeZone};
+
 use credit_core::log::LogStore;
-use credit_core::store::{QoderState, ZcodeState, open_qoder_state, open_zcode_state};
+use credit_core::store::{LingxiState, QoderState, ZcodeState, open_lingxi_state, open_qoder_state, open_zcode_state};
 use trae_core::store::TraeState;
 use wb_switch_core::modules::{
     account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, codebuddy_ide, config,
@@ -337,6 +339,22 @@ pub fn router() -> Router {
             get(api_zcode_get_settings).post(api_zcode_save_settings),
         )
         .route("/api/zcode/next-run", get(api_zcode_next_run))
+
+        // ---- 灵犀(多用户签到:POST checkinUrl + Cookie;核心逻辑在 credit-core)----
+        .route("/api/lingxi/accounts", get(api_lingxi_accounts))
+        .route("/api/lingxi/accounts/add", post(api_lingxi_add_account))
+        .route("/api/lingxi/accounts/import-local", post(api_lingxi_import_local))
+        .route("/api/lingxi/accounts/update", post(api_lingxi_update_account))
+        .route("/api/lingxi/accounts/delete", post(api_lingxi_delete_account))
+        .route("/api/lingxi/checkin", post(api_lingxi_checkin))
+        .route("/api/lingxi/checkin-all", post(api_lingxi_checkin_all))
+        .route("/api/lingxi/logs", get(api_lingxi_logs))
+        .route("/api/lingxi/logs/clear", post(api_lingxi_clear_logs))
+        .route(
+            "/api/lingxi/settings",
+            get(api_lingxi_get_settings).post(api_lingxi_save_settings),
+        )
+        .route("/api/lingxi/next-run", get(api_lingxi_next_run))
         .fallback(static_handler)
 }
 
@@ -1724,12 +1742,15 @@ async fn api_trae_migrate() -> Response {
 
 static QODER_STATE: OnceLock<QoderState> = OnceLock::new();
 static ZCODE_STATE: OnceLock<ZcodeState> = OnceLock::new();
+static LINGXI_STATE: OnceLock<LingxiState> = OnceLock::new();
 /// 两平台共用一个 Client(与 TRAE 同款共享模式)。
 static CREDIT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// 调度循环代数:设置变更后 +1,旧循环自行退出(同 TRAE_SCHED_GEN)。
 static CREDIT_SCHED_GEN: AtomicU64 = AtomicU64::new(0);
 /// 调度器记录的下次执行时刻(Unix 毫秒;None=未调度),供 next-run 查询。
 static CREDIT_NEXT_RUN_MS: Mutex<Option<i64>> = Mutex::new(None);
+/// 灵犀今日已执行的时间点标记("YYYY-MM-DD|HH:MM"),防同一天重复执行。
+static LINGXI_FIRED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn qoder_state() -> &'static QoderState {
     QODER_STATE.get_or_init(open_qoder_state)
@@ -1739,20 +1760,26 @@ pub fn zcode_state() -> &'static ZcodeState {
     ZCODE_STATE.get_or_init(open_zcode_state)
 }
 
+pub fn lingxi_state() -> &'static LingxiState {
+    LINGXI_STATE.get_or_init(open_lingxi_state)
+}
+
 fn credit_client() -> &'static reqwest::Client {
     CREDIT_CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// server 启动时初始化信用平台子系统:两个 state(自动建目录)+ 共享 Client,
+/// server 启动时初始化信用平台子系统:三个 state(自动建目录)+ 共享 Client,
 /// 按设置启动自动领取循环(由 main.rs spawn_background_loops 调用)。
 pub fn init_credit() {
+    let _ = lingxi_state();
     credit_start_scheduler();
 }
 
-/// 信用平台自动领取调度(server 形态):一个循环覆盖两平台,与桌面端
-/// credit_scheduler 同语义——每轮 2h±10min 抖动(credit_core::schedule),
-/// generation 计数控制任务生命周期(旧任务自行退出),分段 sleep 15s
-/// 及时响应设置变更;无系统通知能力,结果降级为 stdout 日志。
+/// 信用平台自动领取调度(server 形态):一个循环覆盖三平台,与桌面端
+/// credit_scheduler 同语义——Qoder/ZCode 每轮 2h±10min 抖动(credit_core::schedule),
+/// 灵犀每日定点时间点在分段 sleep 的 15s 粒度里检查;generation 计数控制任务
+/// 生命周期(旧任务自行退出),分段 sleep 15s 及时响应设置变更;无系统通知能力,
+/// 结果降级为 stdout 日志。
 fn credit_start_scheduler() -> bool {
     let gen = CREDIT_SCHED_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let qoder_auto = qoder_state()
@@ -1767,7 +1794,8 @@ fn credit_start_scheduler() -> bool {
         .unwrap()
         .get_settings()
         .auto_claim_enabled;
-    if !qoder_auto && !zcode_auto {
+    let lingxi_auto = lingxi_enabled();
+    if !qoder_auto && !zcode_auto && !lingxi_auto {
         return true;
     }
     tokio::spawn(async move {
@@ -1779,12 +1807,14 @@ fn credit_start_scheduler() -> bool {
             // 记录下次执行时刻,供 /api/{qoder,zcode}/next-run 查询
             *CREDIT_NEXT_RUN_MS.lock().unwrap() =
                 Some(config::now_ms() + delay.as_millis() as i64);
-            // 分段 sleep,每 15s 检查 generation,及时响应设置变更
+            // 分段 sleep,每 15s 检查 generation,及时响应设置变更;
+            // 顺带做灵犀每日定点检查(到点即执行一轮,三平台同环不另开循环)
             let mut remaining = delay;
             while remaining > std::time::Duration::ZERO {
                 if CREDIT_SCHED_GEN.load(Ordering::SeqCst) != gen {
                     break;
                 }
+                check_lingxi_due().await;
                 let step = remaining.min(std::time::Duration::from_secs(15));
                 tokio::time::sleep(step).await;
                 remaining = remaining.saturating_sub(step);
@@ -1796,6 +1826,58 @@ fn credit_start_scheduler() -> bool {
         }
     });
     true
+}
+
+/// 灵犀是否参与调度:配置了有效签到时间点即参与(每日定点模型,无独立开关)。
+fn lingxi_enabled() -> bool {
+    let times = lingxi_state().data.lock().unwrap().get_settings().checkin_times;
+    !credit_core::schedule::parse_hhmm_list(times.iter().map(String::as_str)).is_empty()
+}
+
+/// 灵犀到点检查(与桌面端 credit_scheduler 同语义):存在"已到点且今日未执行过"
+/// 的时间点 → 执行一轮;fired 标记记 "YYYY-MM-DD|HH:MM",换日自动失效。
+async fn check_lingxi_due() {
+    let times = lingxi_state().data.lock().unwrap().get_settings().checkin_times;
+    let now = chrono::Utc::now();
+    let today = credit_core::schedule::shanghai_today(now);
+    let tz = credit_core::schedule::shanghai_tz();
+    let today_cn = now.with_timezone(&tz).date_naive();
+    let mut due: Vec<String> = Vec::new();
+    for (h, m) in credit_core::schedule::parse_hhmm_list(times.iter().map(String::as_str)) {
+        let at = tz.with_ymd_and_hms(today_cn.year(), today_cn.month(), today_cn.day(), h, m, 0);
+        if let Some(at) = at.single() {
+            if at.with_timezone(&chrono::Utc) <= now {
+                due.push(format!("{today}|{h:02}:{m:02}"));
+            }
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
+    {
+        let mut fired = LINGXI_FIRED.lock().unwrap();
+        fired.retain(|k| k.starts_with(&format!("{today}|")));
+        let new_keys: Vec<String> = due.iter().filter(|k| !fired.contains(*k)).cloned().collect();
+        if new_keys.is_empty() {
+            return;
+        }
+        fired.extend(new_keys);
+    }
+    run_lingxi_round().await;
+}
+
+/// 一轮灵犀签到(无通知者,汇总打 stdout,失败明细走 eprintln)。
+async fn run_lingxi_round() {
+    let today = credit_core::schedule::shanghai_today(chrono::Utc::now());
+    let results =
+        credit_core::lingxi::checkin::checkin_all(lingxi_state(), credit_client(), &today).await;
+    let ok = results.iter().filter(|(_, o)| o.outcome.is_success()).count();
+    println!("[灵犀] 自动签到完成: 成功 {ok}, 共 {}", results.len());
+    for (_, o) in &results {
+        if o.outcome == credit_core::lingxi::Outcome::Failed {
+            eprintln!("[灵犀] 签到失败: {}", o.message);
+        }
+    }
 }
 
 /// 一轮自动领取:Qoder checkin_all + ZCode claim_all(各自受平台自动开关约束;
@@ -2362,5 +2444,246 @@ async fn api_zcode_next_run() -> Response {
         .get_settings()
         .auto_claim_enabled;
     let next = if auto { credit_next_run_rfc3339() } else { None };
+    json_ok(json!(next))
+}
+
+// ----- 灵犀 handlers(多用户签到;checkinUrl/Cookie 由用户抓包获取) -----
+
+fn find_lingxi_account(id: &str) -> Option<credit_core::lingxi::LingxiAccount> {
+    lingxi_state()
+        .data
+        .lock()
+        .unwrap()
+        .get_accounts()
+        .iter()
+        .find(|a| a.id == id)
+        .cloned()
+}
+
+/// 灵犀签到结果序列化(LingxiCheckinOutcome 未实现 Serialize)。
+fn lingxi_outcome_json(
+    id: &str,
+    o: &credit_core::lingxi::checkin::LingxiCheckinOutcome,
+) -> Value {
+    json!({
+        "id": id,
+        "outcome": o.outcome.as_str(),
+        "message": o.message,
+    })
+}
+
+async fn api_lingxi_accounts() -> Response {
+    let data = lingxi_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.get_accounts()).unwrap_or(json!([])))
+}
+
+async fn api_lingxi_add_account(Json(body): Json<Value>) -> Response {
+    let checkin_url = match body_str(&body, "checkinUrl") {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return credit_missing("checkinUrl"),
+    };
+    let cookie = match body_str(&body, "cookie") {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return credit_missing("cookie"),
+    };
+    let name = body_str(&body, "name").unwrap_or_else(|| "灵犀账号".into());
+    let account = credit_core::lingxi::LingxiAccount {
+        id: credit_core::store::generate_id(),
+        name,
+        checkin_url: checkin_url.trim().into(),
+        cookie: cookie.trim().into(),
+        created_at: config::now_ms(),
+        enabled: body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        ..Default::default()
+    };
+    let state = lingxi_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.accounts.push(account.clone());
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(serde_json::to_value(account).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// POST /api/lingxi/accounts/import-local —— 从本机灵犀客户端导入当前登录态。
+/// DPAPI 解密 + SQLite 读取是阻塞 IO,放 blocking 线程(与 qoder import-local 同款);
+/// 相同 checkinUrl+Cookie 已存在则原样返回该账号(前端提示已导入)。
+async fn api_lingxi_import_local(Json(body): Json<Value>) -> Response {
+    let checkin_url = match body_str(&body, "checkinUrl") {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => return credit_missing("checkinUrl"),
+    };
+    let url_for_import = checkin_url.clone();
+    let imported = match tokio::task::spawn_blocking(move || {
+        credit_core::lingxi::local_import::import_from_local(&url_for_import)
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let imported = match imported {
+        Ok(v) => v,
+        Err(e) => return json_err(e.to_string(), StatusCode::BAD_REQUEST),
+    };
+    let name = match body_str(&body, "name").map(|s| s.trim().to_string()) {
+        Some(n) if !n.is_empty() => n,
+        _ => format!("灵犀-{}", imported.host),
+    };
+    let state = lingxi_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        if let Some(existing) = data
+            .get_accounts()
+            .iter()
+            .find(|a| a.checkin_url == checkin_url && a.cookie == imported.cookie_header)
+        {
+            return json_ok(serde_json::to_value(existing).unwrap_or(json!(null)));
+        }
+        let account = credit_core::lingxi::LingxiAccount {
+            id: credit_core::store::generate_id(),
+            name,
+            checkin_url,
+            cookie: imported.cookie_header,
+            created_at: config::now_ms(),
+            enabled: true,
+            ..Default::default()
+        };
+        data.accounts.push(account.clone());
+        data.save(&state.store_file()).map(|_| account)
+    };
+    match r {
+        Ok(acc) => json_ok(serde_json::to_value(acc).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_lingxi_update_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    // 兼容两种形态:{id, updates:{...}} 或把更新字段直接平铺在 body 里
+    let updates = body.get("updates").cloned().unwrap_or_else(|| body.clone());
+    let state = lingxi_state();
+    let mut data = state.data.lock().unwrap();
+    let Some(acc) = data.update_account(&id, updates) else {
+        return credit_not_found(&id);
+    };
+    match data.save(&state.store_file()).map(|_| acc) {
+        Ok(acc) => json_ok(serde_json::to_value(acc).unwrap_or(json!(null))),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_lingxi_delete_account(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let state = lingxi_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        if data.get_accounts().iter().all(|a| a.id != id) {
+            return credit_not_found(&id);
+        }
+        data.delete_account(&id);
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_lingxi_checkin(Json(body): Json<Value>) -> Response {
+    let Some(id) = body_str(&body, "id") else {
+        return credit_missing("id");
+    };
+    let Some(acc) = find_lingxi_account(&id) else {
+        return credit_not_found(&id);
+    };
+    let today = credit_core::schedule::shanghai_today(chrono::Utc::now());
+    let o = credit_core::lingxi::checkin::checkin_one(lingxi_state(), credit_client(), &acc, &today)
+        .await;
+    json_ok(lingxi_outcome_json(&id, &o))
+}
+
+async fn api_lingxi_checkin_all() -> Response {
+    let today = credit_core::schedule::shanghai_today(chrono::Utc::now());
+    let results =
+        credit_core::lingxi::checkin::checkin_all(lingxi_state(), credit_client(), &today).await;
+    json_ok(Value::Array(
+        results
+            .iter()
+            .map(|(id, o)| lingxi_outcome_json(id, o))
+            .collect(),
+    ))
+}
+
+async fn api_lingxi_logs(RawQuery(query): RawQuery) -> Response {
+    let limit = query
+        .as_deref()
+        .and_then(|q| {
+            q.split('&').find_map(|p| p.split_once('=')).and_then(|(k, v)| {
+                (k == "limit").then_some(v).and_then(|v| v.parse::<usize>().ok())
+            })
+        })
+        .unwrap_or(100);
+    let data = lingxi_state().data.lock().unwrap();
+    json_ok(serde_json::to_value(data.list_logs(limit)).unwrap_or(json!([])))
+}
+
+async fn api_lingxi_clear_logs() -> Response {
+    let state = lingxi_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        data.clear_logs();
+        data.save(&state.store_file())
+    };
+    match r {
+        Ok(()) => json_ok(json!(true)),
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_lingxi_get_settings() -> Response {
+    let s = lingxi_state().data.lock().unwrap().get_settings();
+    json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+}
+
+async fn api_lingxi_save_settings(Json(body): Json<Value>) -> Response {
+    // 前端发送 {settings: partial};兼容直接平铺的 partial
+    let payload = body.get("settings").cloned().unwrap_or(body);
+    let partial: credit_core::lingxi::PartialLingxiSettings = match serde_json::from_value(payload)
+    {
+        Ok(p) => p,
+        Err(e) => return json_err(format!("设置格式错误: {e}"), StatusCode::BAD_REQUEST),
+    };
+    let state = lingxi_state();
+    let r = {
+        let mut data = state.data.lock().unwrap();
+        let mut merged = data.get_settings();
+        merged.merge_partial(&partial);
+        data.settings = merged.clone();
+        data.save(&state.store_file()).map(|_| merged)
+    };
+    match r {
+        Ok(s) => {
+            // 设置变更后重启调度(与桌面端同语义:三平台任一有调度需求则继续跑)
+            credit_start_scheduler();
+            json_ok(serde_json::to_value(s).unwrap_or(json!({})))
+        }
+        Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// 下次执行时间(RFC3339):按设置的时间点纯计算,Asia/Shanghai 当日未来最近,
+/// 否则明日最早;列表为空/全非法 → null。
+async fn api_lingxi_next_run() -> Response {
+    let times = lingxi_state().data.lock().unwrap().get_settings().checkin_times;
+    let next = credit_core::schedule::lingxi_next_run(&times, chrono::Utc::now())
+        .map(|dt| dt.to_rfc3339());
     json_ok(json!(next))
 }

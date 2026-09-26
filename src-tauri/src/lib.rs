@@ -4,6 +4,7 @@ mod companion;
 mod credit_scheduler;
 #[cfg(target_os = "macos")]
 mod instance_lock;
+mod lingxi_commands;
 #[cfg(desktop)]
 mod tray;
 mod qoder_commands;
@@ -120,9 +121,9 @@ fn spawn_background_loops(app: tauri::AppHandle) {
     // 未开启 auto_checkin 时内部直接返回，设置变更经 trae_save_settings 重启调度。
     trae_scheduler::start_scheduler(app.clone());
 
-    // Qoder/ZCode 信用平台：单循环覆盖两平台（2h±10min 抖动，Qoder 领取 + ZCode 领取同轮）。
-    // 与 workbuddy / TRAE 循环语义均不同，独立成环互不影响；两平台都未开启自动领取时
-    // 内部直接返回，设置变更经 qoder/zcode_save_settings 重启调度。
+    // Qoder/ZCode/灵犀 信用平台：单循环覆盖三平台（Qoder/ZCode 2h±10min 抖动轮 +
+    // 灵犀每日定点时间点）。与 workbuddy / TRAE 循环语义均不同，独立成环互不影响；
+    // 全部平台都无调度需求时内部直接返回，设置变更经 qoder/zcode/lingxi_save_settings 重启调度。
     credit_scheduler::start_scheduler(app.clone());
 
     // 限额 hook 信号：轮询 `~/.wb-switch/hook-events.jsonl`（CLI / WorkBuddy 的 429 当轮
@@ -228,6 +229,10 @@ pub fn run() {
             });
             app.manage(zcode_commands::ZcodeState {
                 core: credit_core::store::open_zcode_state(),
+                client: reqwest::Client::new(),
+            });
+            app.manage(lingxi_commands::LingxiState {
+                core: credit_core::store::open_lingxi_state(),
                 client: reqwest::Client::new(),
             });
             app.manage(credit_scheduler::CreditSchedulerState::default());
@@ -371,6 +376,19 @@ pub fn run() {
             zcode_commands::zcode_get_settings,
             zcode_commands::zcode_save_settings,
             zcode_commands::zcode_get_next_run_time,
+            // 灵犀多用户签到（POST checkinUrl + Cookie,见 lingxi_commands.rs / credit_scheduler.rs）
+            lingxi_commands::lingxi_get_accounts,
+            lingxi_commands::lingxi_add_account,
+            lingxi_commands::lingxi_update_account,
+            lingxi_commands::lingxi_delete_account,
+            lingxi_commands::lingxi_import_local,
+            lingxi_commands::lingxi_checkin_account,
+            lingxi_commands::lingxi_checkin_all,
+            lingxi_commands::lingxi_get_logs,
+            lingxi_commands::lingxi_clear_logs,
+            lingxi_commands::lingxi_get_settings,
+            lingxi_commands::lingxi_save_settings,
+            lingxi_commands::lingxi_get_next_run_time,
             companion::get_companion_enabled,
             companion::set_companion_enabled,
             companion::open_companion_settings,

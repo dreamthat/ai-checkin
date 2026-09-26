@@ -17,6 +17,8 @@ hostname = "0.4"
 # ZCode credentials.json 的 enc:v1 为 AES-256-GCM(SHA256 派生密钥)
 aes-gcm = "0.10"
 sha2 = "0.10"
+# 灵犀本地导入:读取客户端 Chromium Cookies SQLite(临时副本只读打开)
+rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "deflate"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process"] }
 

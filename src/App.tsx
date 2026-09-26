@@ -16,6 +16,8 @@ import QoderPage from "@/pages/QoderPage";
 import QoderSettingsPage from "@/pages/QoderSettingsPage";
 import ZCodePage from "@/pages/ZCodePage";
 import ZCodeSettingsPage from "@/pages/ZCodeSettingsPage";
+import LingxiPage from "@/pages/LingxiPage";
+import LingxiSettingsPage from "@/pages/LingxiSettingsPage";
 import { StatusDot, AppIconMark } from "@/components/product-marks";
 import { CompanionDemoDialog } from "@/components/companion-demo-dialog";
 import { DemoAction } from "@/components/demo-action";
@@ -196,7 +198,7 @@ function UpdateCenter({ running }: { running: boolean | undefined }) {
 }
 
 /**
- * 顶部平台标签页定义:一级平台域切换(灵犀为预留位,接入后补路由与页面即可)。
+ * 顶部平台标签页定义:一级平台域切换。
  * traeOnly:仅 Windows 或 webui 可用(与 TRAE 侧栏项可见性一致);comingSoon:置灰预留。
  */
 type PlatformTab = "workbuddy" | "trae" | "qoder" | "zcode" | "lingxi";
@@ -214,7 +216,7 @@ const PLATFORM_TABS: {
   { platform: "trae", label: "TRAE", path: "/trae", traeOnly: true },
   { platform: "qoder", label: "Qoder", path: "/qoder" },
   { platform: "zcode", label: "ZCode", path: "/zcode" },
-  { platform: "lingxi", label: "灵犀", path: "/lingxi", comingSoon: true },
+  { platform: "lingxi", label: "灵犀", path: "/lingxi" },
 ];
 
 function PlatformTabs({ current, traeEnabled, avoidTitleBar }: { current: PlatformTab; traeEnabled: boolean; avoidTitleBar: boolean }) {
@@ -292,7 +294,8 @@ function Layout() {
   const showTraeNav =
     !demoModeEnabled && (!api.isDesktop() || navigator.userAgent.includes("Windows"));
 
-  // 当前平台域由路由推导:/trae* 属 TRAE 域、/qoder* 属 Qoder 域、/zcode* 属 ZCode 域,其余(含 /settings)属 WorkBuddy 域
+  // 当前平台域由路由推导:/trae* 属 TRAE 域、/qoder* 属 Qoder 域、/zcode* 属 ZCode 域、
+  // /lingxi* 属灵犀域,其余(含 /settings)属 WorkBuddy 域
   const { pathname } = useLocation();
   const platform: PlatformTab = pathname.startsWith("/trae")
     ? "trae"
@@ -300,7 +303,9 @@ function Layout() {
       ? "qoder"
       : pathname.startsWith("/zcode")
         ? "zcode"
-        : "workbuddy";
+        : pathname.startsWith("/lingxi")
+          ? "lingxi"
+          : "workbuddy";
 
   return (
     <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
@@ -355,10 +360,10 @@ function Layout() {
             </>
           ) : (
             <>
-              {/* Qoder / ZCode 域同构:账号管理 + 设置(不做 Windows 门控,本机导入入口在弹窗内门控) */}
-              <SideLink to={platform === "qoder" ? "/qoder" : "/zcode"} end icon={<Rocket className="size-4" />} label="账号管理" />
+              {/* Qoder / ZCode / 灵犀 域同构:账号管理 + 设置(不做 Windows 门控,平台专属入口在弹窗内门控) */}
+              <SideLink to={`/${platform}`} end icon={<Rocket className="size-4" />} label="账号管理" />
               <SideLink
-                to={platform === "qoder" ? "/qoder/settings" : "/zcode/settings"}
+                to={`/${platform}/settings`}
                 icon={<Settings className="size-4" />}
                 label="设置"
               />
@@ -398,6 +403,8 @@ export default function App() {
             <Route path="/qoder/settings" element={<QoderSettingsPage />} />
             <Route path="/zcode" element={<ZCodePage />} />
             <Route path="/zcode/settings" element={<ZCodeSettingsPage />} />
+            <Route path="/lingxi" element={<LingxiPage />} />
+            <Route path="/lingxi/settings" element={<LingxiSettingsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

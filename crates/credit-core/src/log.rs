@@ -6,6 +6,7 @@ use crate::store::CreditStoreData;
 
 pub const PLATFORM_QODER: &str = "qoder";
 pub const PLATFORM_ZCODE: &str = "zcode";
+pub const PLATFORM_LINGXI: &str = "lingxi";
 /// 日志上限(超出丢弃最旧)
 pub const MAX_LOGS: usize = 500;
 
@@ -15,7 +16,7 @@ pub struct LogEntry {
     pub time: i64,
     pub account_id: String,
     pub account_name: String,
-    /// 平台:"qoder" | "zcode"
+    /// 平台:"qoder" | "zcode" | "lingxi"
     pub platform: String,
     /// 结果(ClaimOutcome 字符串)
     pub result: String,

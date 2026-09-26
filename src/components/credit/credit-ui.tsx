@@ -53,6 +53,37 @@ export function isClaimSuccess(result: string | null | undefined): boolean {
   return result === "checked-in" || result === "already";
 }
 
+/** 灵犀签到结果 → 徽标展示态；unknown 用黄色「结果未知」提示（core 会在下个时间点重试）。 */
+export function lingxiOutcomeBadge(result: string | null | undefined): {
+  text: string;
+  variant: BadgeVariant;
+  className?: string;
+} {
+  switch (result) {
+    case "success":
+      return { text: "签到成功", variant: "default" };
+    case "already":
+      return { text: "已签到", variant: "secondary" };
+    case "unknown":
+      return {
+        text: "结果未知",
+        variant: "outline",
+        className: "border-amber-500/50 text-amber-600 dark:text-amber-500",
+      };
+    case "failed":
+      return { text: "签到失败", variant: "destructive" };
+    case "skipped":
+      return { text: "已跳过", variant: "secondary" };
+    default:
+      return { text: "未签到", variant: "secondary" };
+  }
+}
+
+/** 灵犀成功口径（success / already），今日摘要计数用（与 core Outcome::is_success 一致）。 */
+export function isLingxiSuccess(result: string | null | undefined): boolean {
+  return result === "success" || result === "already";
+}
+
 /**
  * Qoder 额度原始 JSON（/api/v2/quota/usage）→ 剩余/总额。
  * 口径同 CreditDaddy normalizeQoderQuota：userQuota / addOnQuota / orgResourcePackage 求和（total > 0 的部分）。

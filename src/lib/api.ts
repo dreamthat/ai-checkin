@@ -62,6 +62,10 @@ import type {
   ZcodeClaimAllResult,
   ZcodeClaimResult,
   ZcodeSettings,
+  LingxiAccount,
+  LingxiCheckinAllResult,
+  LingxiCheckinResult,
+  LingxiSettings,
 } from "./types";
 import { DEMO_UNAVAILABLE_MESSAGE, demoModeEnabled } from "./demo-mode";
 import { screenshotDemoResponse } from "./screenshot-demo";
@@ -239,6 +243,19 @@ const ROUTES: Record<string, Route> = {
   zcode_get_settings: { method: "GET", path: "/api/zcode/settings" },
   zcode_save_settings: { method: "POST", path: "/api/zcode/settings" },
   zcode_get_next_run_time: { method: "GET", path: "/api/zcode/next-run" },
+  // 灵犀签到子系统（金山 Lingxi；与 src-tauri/src/lingxi_commands.rs 一一对应）
+  lingxi_get_accounts: { method: "GET", path: "/api/lingxi/accounts" },
+  lingxi_add_account: { method: "POST", path: "/api/lingxi/accounts/add" },
+  lingxi_import_local: { method: "POST", path: "/api/lingxi/accounts/import-local" },
+  lingxi_update_account: { method: "POST", path: "/api/lingxi/accounts/update" },
+  lingxi_delete_account: { method: "POST", path: "/api/lingxi/accounts/delete" },
+  lingxi_checkin_account: { method: "POST", path: "/api/lingxi/checkin" },
+  lingxi_checkin_all: { method: "POST", path: "/api/lingxi/checkin-all" },
+  lingxi_get_logs: { method: "GET", path: "/api/lingxi/logs" },
+  lingxi_clear_logs: { method: "POST", path: "/api/lingxi/logs/clear" },
+  lingxi_get_settings: { method: "GET", path: "/api/lingxi/settings" },
+  lingxi_save_settings: { method: "POST", path: "/api/lingxi/settings" },
+  lingxi_get_next_run_time: { method: "GET", path: "/api/lingxi/next-run" },
 };
 
 /**
@@ -1229,4 +1246,69 @@ export function zcodeSaveSettings(partial: Partial<ZcodeSettings>): Promise<Zcod
 /** 下次定时领取时间（ISO 字符串；未启用为 null）。 */
 export function zcodeGetNextRunTime(): Promise<string | null> {
   return call("zcode_get_next_run_time");
+}
+
+// ---------------------------------------------------------------------------
+// 灵犀签到子系统（金山 Lingxi）：11 个命令的 call 包装。
+// checkinUrl 与 Cookie 由用户从浏览器 F12 抓包手动获取，无本地凭据检测。
+// ---------------------------------------------------------------------------
+
+/** 灵犀账号列表。 */
+export function lingxiGetAccounts(): Promise<LingxiAccount[]> {
+  return call("lingxi_get_accounts");
+}
+
+/** 手动添加账号（name 缺省「灵犀账号」；checkinUrl / cookie 均由浏览器抓包获取）。 */
+export function lingxiAddAccount(name: string, checkinUrl: string, cookie: string): Promise<LingxiAccount> {
+  return call("lingxi_add_account", { name, checkinUrl, cookie });
+}
+
+/** 从本机 WPS 灵犀客户端导入当前登录态（解密客户端 Chromium Cookies；仅 Windows；同名登录态已导入时返回已有账号）。 */
+export function lingxiImportLocal(checkinUrl: string, name?: string): Promise<LingxiAccount> {
+  return call("lingxi_import_local", { checkinUrl, name });
+}
+
+/** 更新账号字段（name / checkinUrl / cookie / enabled 等，后端按需合并写回）。 */
+export function lingxiUpdateAccount(id: string, updates: Partial<LingxiAccount>): Promise<LingxiAccount> {
+  return call("lingxi_update_account", { id, updates });
+}
+
+/** 删除账号。 */
+export function lingxiDeleteAccount(id: string): Promise<boolean> {
+  return call("lingxi_delete_account", { id });
+}
+
+/** 单账号签到（POST checkinUrl + Cookie，响应文本三级判定在 core）。 */
+export function lingxiCheckinAccount(id: string): Promise<LingxiCheckinResult> {
+  return call("lingxi_checkin_account", { id });
+}
+
+/** 一键签到全部启用账号（当日已成功的账号返回 skipped）。 */
+export function lingxiCheckinAll(): Promise<LingxiCheckinAllResult> {
+  return call("lingxi_checkin_all");
+}
+
+/** 签到日志（新的在前）。 */
+export function lingxiGetLogs(limit?: number): Promise<CreditLogEntry[]> {
+  return call("lingxi_get_logs", limit ? { limit } : undefined);
+}
+
+/** 清空签到日志。 */
+export function lingxiClearLogs(): Promise<boolean> {
+  return call("lingxi_clear_logs");
+}
+
+/** 灵犀设置。 */
+export function lingxiGetSettings(): Promise<LingxiSettings> {
+  return call("lingxi_get_settings");
+}
+
+/** 保存设置（partial；checkinTimes 过滤非法格式，保存后后端会重启调度）。 */
+export function lingxiSaveSettings(partial: Partial<LingxiSettings>): Promise<LingxiSettings> {
+  return call("lingxi_save_settings", { settings: partial });
+}
+
+/** 下次执行时间（ISO 字符串；无有效时间点为 null）。 */
+export function lingxiGetNextRunTime(): Promise<string | null> {
+  return call("lingxi_get_next_run_time");
 }
