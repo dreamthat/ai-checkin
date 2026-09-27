@@ -84,6 +84,21 @@ export function isLingxiSuccess(result: string | null | undefined): boolean {
   return result === "success" || result === "already";
 }
 
+/** 今日日期（YYYY-MM-DD，Asia/Shanghai 固定 UTC+8，与 core 幂等口径一致）。 */
+export function shanghaiToday(): string {
+  return new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
+}
+
+/** 毫秒时间戳 → Asia/Shanghai 日期（YYYY-MM-DD），与 core 调度/幂等的日期口径一致。 */
+export function msToShanghaiDate(ms: number): string {
+  return new Date(ms + 8 * 3_600_000).toISOString().slice(0, 10);
+}
+
+/** 账号今日是否已签到成功（lastSuccessDate = 今天 且 最近结果为成功/已签）。 */
+export function lingxiCheckedInToday(account: { lastSuccessDate?: string | null; lastResult?: string | null }): boolean {
+  return account.lastSuccessDate === shanghaiToday() && isLingxiSuccess(account.lastResult);
+}
+
 /**
  * Qoder 额度原始 JSON（/api/v2/quota/usage）→ 剩余/总额。
  * 口径同 CreditDaddy normalizeQoderQuota：userQuota / addOnQuota / orgResourcePackage 求和（total > 0 的部分）。

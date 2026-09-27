@@ -473,10 +473,11 @@ export function TraeAccountCard({ account, onDelete }: TraeAccountCardProps) {
           size="sm"
           className="flex-1"
           onClick={() => void handleCheckin()}
-          disabled={checkingIn || !account.enabled}
+          disabled={checkingIn || !account.enabled || account.checkedToday === true}
+          title={account.checkedToday === true ? "今日已签到，明日自动继续" : undefined}
         >
           {checkingIn && <Loader2 className="animate-spin" />}
-          {checkingIn ? "签到中" : "立即签到"}
+          {checkingIn ? "签到中" : account.checkedToday === true ? "今日已签到" : "立即签到"}
         </Button>
         {!isJwt &&
           (instance.source === "none" ? (

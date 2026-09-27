@@ -111,9 +111,19 @@ pub fn classify_response(text: &str) -> Outcome {
     if lower.contains("已签到") || lower.contains("已签过") {
         return Outcome::Already;
     }
+    // 官方任务中心 claim 接口(lingxi.kdocs.cn/api/public/v1/tasks/daily_check_in/claim)
+    // 的成功响应。两层形态都覆盖:
+    //   ① 网页实测(2026-09):{"data":{...,"result":"ok"},"vCode":0}
+    //   ② 业务数据体:{task_key:"daily_check_in", reward_amount, trade_no:"lx_task_...",
+    //      total_claimed_credits, extra:{check_in_days:[...], consecutive_days, ...}}
+    // task_key=日常签到 与 total_claimed_credits(累计到账智点)只在领取成功响应中出现。
     if lower.contains("成功")
         || res_compact.contains("\"success\":true")
         || res_compact.contains("\"error\":0")
+        || res_compact.contains("\"result\":\"ok\"")
+        || res_compact.contains("\"vcode\":0")
+        || res_compact.contains("\"task_key\":\"daily_check_in\"")
+        || res_compact.contains("\"total_claimed_credits\"")
     {
         return Outcome::Success;
     }
@@ -197,6 +207,15 @@ mod tests {
         assert_eq!(classify_response(r#"{"error":0,"msg":"ok"}"#), Outcome::Success);
         // 大小写不敏感(HTML/JSON 混合响应)
         assert_eq!(classify_response(r#"{"Success":TRUE}"#), Outcome::Success);
+        // —— Success:官方 claim 接口实测形态(2026-09 截图,lx_task_8045248 签到到账 100) ——
+        let claim_ok = r#"{"data":{"task_key":"daily_check_in","reward_amount":100,"trade_no":"lx_task_8045248_daily_check_in_1902252","total_claimed_credits":100,"extras":{"check_in_days":[{"day":1,"date":"2026-09-27","reward":100,"status":"claimed"}]}},"vCode":0}"#;
+        assert_eq!(classify_response(claim_ok), Outcome::Success);
+        assert_eq!(classify_response(r#"{"result":"ok"}"#), Outcome::Success);
+        // 官方文档化业务数据体形态(无 result/vCode 包裹):task_key + total_claimed_credits
+        let claim_body = r#"{"task_key":"daily_check_in","reward_amount":100,"trade_no":"lx_task_8045248_daily_check_in_1902252","total_claimed_credits":100,"extra":{"check_in_days":[{"day":1,"date":"2026-09-27","reward":100,"status":"claimed"},{"day":7,"date":"2026-10-03","reward":200,"status":"locked"}],"consecutive_days":1,"today_day":1,"today_reward":100}}"#;
+        assert_eq!(classify_response(claim_body), Outcome::Success);
+        // vCode 非 0 不得命中 vcode:0 特征(无其他特征时归未知,交人工确认)
+        assert_eq!(classify_response(r#"{"vCode":1003,"msg":"操作太过频繁"}"#), Outcome::Unknown);
         // —— Unknown:都不匹配 → 不写成功状态 ——
         assert_eq!(classify_response("hello world"), Outcome::Unknown);
         assert_eq!(classify_response(""), Outcome::Unknown);

@@ -2,7 +2,12 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
-import { creditCardClass, formatCreditTime, lingxiOutcomeBadge } from "@/components/credit/credit-ui";
+import {
+  creditCardClass,
+  formatCreditTime,
+  lingxiCheckedInToday,
+  lingxiOutcomeBadge,
+} from "@/components/credit/credit-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -116,7 +121,10 @@ export function LingxiAccountCard({ account, onDelete }: LingxiAccountCardProps)
   }
 
   // ---- 展示态推导 ----
-  const outcomeBadge = lingxiOutcomeBadge(account.lastResult);
+  const checkedInToday = lingxiCheckedInToday(account);
+  const outcomeBadge = checkedInToday
+    ? { text: "今日已签到", variant: "secondary" as const, className: "" }
+    : lingxiOutcomeBadge(account.lastResult);
 
   return (
     <div className={cn(creditCardClass, !account.enabled && "opacity-55")}>
@@ -185,10 +193,10 @@ export function LingxiAccountCard({ account, onDelete }: LingxiAccountCardProps)
           size="sm"
           className="flex-1"
           onClick={() => void handleCheckin()}
-          disabled={checking || !account.enabled}
+          disabled={checking || !account.enabled || checkedInToday}
         >
           {checking && <Loader2 className="animate-spin" />}
-          {checking ? "签到中" : "立即签到"}
+          {checking ? "签到中" : checkedInToday ? "今日已签到" : "立即签到"}
         </Button>
         <Button
           size="sm"

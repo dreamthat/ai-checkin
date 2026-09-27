@@ -113,23 +113,17 @@ pub fn lingxi_delete_account(id: String, state: State<'_, LingxiState>) -> AppRe
     Ok(true)
 }
 
-/// 从本机导入请求体(camelCase 对齐前端)。
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LingxiImportLocalBody {
-    pub checkin_url: String,
-    pub name: Option<String>,
-}
-
 /// 从本机 WPS 灵犀客户端导入当前登录态:core 解密 Cookies SQLite → upsert 账号。
 /// DPAPI + SQLite 是阻塞 IO,放 blocking 线程;相同 checkinUrl+Cookie 已存在则原样返回。
+/// 参数为展开式(与 lingxi_add_account 一致):Tauri invoke 键为 checkinUrl/name(camelCase)。
 #[tauri::command]
 pub async fn lingxi_import_local(
-    body: LingxiImportLocalBody,
+    checkin_url: Option<String>,
+    name: Option<String>,
     state: State<'_, LingxiState>,
 ) -> AppResult<LingxiAccount> {
     // checkinUrl 允许为空:core 会按灵犀主域(lingxi.wps.cn)匹配 Cookie,签到地址可后补
-    let checkin_url = body.checkin_url.trim().to_string();
+    let checkin_url = checkin_url.unwrap_or_default().trim().to_string();
     let url_for_import = checkin_url.clone();
     let imported = tokio::task::spawn_blocking(move || {
         credit_core::lingxi::local_import::import_from_local(&url_for_import)
@@ -139,7 +133,7 @@ pub async fn lingxi_import_local(
     let imported = imported?;
 
     let name = {
-        let trimmed = body.name.as_deref().unwrap_or("").trim();
+        let trimmed = name.as_deref().unwrap_or("").trim();
         if trimmed.is_empty() {
             format!("灵犀-{}", imported.host)
         } else {

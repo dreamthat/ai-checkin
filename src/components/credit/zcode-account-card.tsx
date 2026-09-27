@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, RefreshCw } from "lucide-react";
 
-import { claimOutcomeBadge, creditCardClass, formatCreditTime, formatQuotaAmount } from "@/components/credit/credit-ui";
+import { claimOutcomeBadge, creditCardClass, formatCreditTime, formatQuotaAmount, msToShanghaiDate, shanghaiToday } from "@/components/credit/credit-ui";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -110,6 +110,11 @@ export function ZcodeAccountCard({ account, onDelete }: ZcodeAccountCardProps) {
 
   // ---- 展示态推导 ----
   const outcomeBadge = claimOutcomeBadge(account.lastResult);
+  // 今日已领取（成功口径 checked-in/already）→ 领取按钮灰化
+  const claimedToday =
+    account.lastClaimAt != null &&
+    msToShanghaiDate(account.lastClaimAt) === shanghaiToday() &&
+    (account.lastResult === "checked-in" || account.lastResult === "already");
   const quota = account.quota;
   const quotaText = (() => {
     if (!quota) return null;
@@ -195,10 +200,11 @@ export function ZcodeAccountCard({ account, onDelete }: ZcodeAccountCardProps) {
           size="sm"
           className="flex-1"
           onClick={() => void handleClaim()}
-          disabled={claiming || !account.enabled}
+          disabled={claiming || !account.enabled || claimedToday}
+          title={claimedToday ? "今日已领取，明天再来" : undefined}
         >
           {claiming && <Loader2 className="animate-spin" />}
-          {claiming ? "领取中" : "立即领取"}
+          {claiming ? "领取中" : claimedToday ? "今日已领取" : "立即领取"}
         </Button>
         <Button
           size="sm"

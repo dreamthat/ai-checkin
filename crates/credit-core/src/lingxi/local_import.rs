@@ -186,12 +186,12 @@ fn decrypt_cookie_value(key: &[u8], encrypted: &[u8]) -> AppResult<String> {
 }
 
 /// Cookies 行(排序与拼接所需的最小字段)。
+/// expires_utc 仅在过滤阶段使用,不留存(避免 dead_code)。
 struct CookieRow {
     host_key: String,
     name: String,
     value: String,
     path: String,
-    expires_utc: i64,
 }
 
 /// 单行查询结果(host_key, name, encrypted_value, 明文 value, path, expires_utc)。
@@ -270,7 +270,7 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
         };
         if let Some(value) = resolved {
             if !value.is_empty() {
-                rows.push(CookieRow { host_key, name, value, path, expires_utc });
+                rows.push(CookieRow { host_key, name, value, path });
             }
         }
     }
@@ -412,7 +412,6 @@ mod tests {
             name: name.into(),
             value: "v".into(),
             path: path.into(),
-            expires_utc: 0,
         };
         let mut rows = vec![
             mk("lingxi.wps.cn", "a", "/"),

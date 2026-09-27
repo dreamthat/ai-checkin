@@ -4,7 +4,7 @@ import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { LingxiAccountCard } from "@/components/credit/lingxi-account-card";
 import { LingxiAddAccountModal } from "@/components/credit/lingxi-add-account-modal";
-import { formatCreditLogTime, isLingxiSuccess, lingxiOutcomeBadge } from "@/components/credit/credit-ui";
+import { formatCreditLogTime, isLingxiSuccess, lingxiOutcomeBadge, shanghaiToday } from "@/components/credit/credit-ui";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,11 +20,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/api";
 import type { LingxiAccount } from "@/lib/types";
 import { useLingxiStore } from "@/stores/lingxi";
-
-/** 今日日期（YYYY-MM-DD，Asia/Shanghai 固定 UTC+8，与 core 幂等口径一致）。 */
-function shanghaiToday(): string {
-  return new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
-}
 
 export default function LingxiPage() {
   const { accounts, logs, loading, error, fetchAll, checkinAll, clearLogs } = useLingxiStore();
