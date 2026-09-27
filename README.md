@@ -1,6 +1,6 @@
 # workbuddy-switch
 
-WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code CodeBuddy 插件账号切换桌面 App（Tauri），四者均支持国内版 / 国际版，并提供积分到期与 Token 用量监控。
+AI 编程工具多合一账号管理桌面 App（Tauri）：WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code CodeBuddy 插件账号切换（四者均支持国内版 / 国际版），并提供积分到期与 Token 用量监控；另支持 TRAE 多开实例管理与自动签到、Qoder / ZCode 额度自动领取、金山灵犀多账号自动签到。
 
 <p align="center">
   <img src="public/icon-transparent.png" alt="WorkBuddy Switch 图标" width="128" />
@@ -50,6 +50,10 @@ xattr -rd com.apple.quarantine "/Applications/workbuddy-switch.app"
 | 自动更新 | 从 GitHub Releases 检查新版本，整包更新经签名校验 |
 | 会话悬浮窗 | 桌面版内置 Agent Companion 悬浮栏，在桌面集中显示 Codex / WorkBuddy / CodeBuddy / Codeg 会话的运行中 / 待确认 / 已完成状态；悬停查看详情，支持跳转时点击回到原会话，托盘可临时隐藏 |
 | 权限检测 | macOS 授权引导（App 管理 / 完全磁盘访问拖拽授权 + 自动检测） |
+| TRAE 多开与签到 | TRAE 账号多开实例管理（桌面客户端导入 / 新开实例登录 / 扫描已有多开目录 / JWT 手动录入）、每日自动签到、积分与 JWT 凭据状态、冷却与伪设备标识维护、独立设置页 |
+| Qoder 额度领取 | Qoder 账号凭据管理（国内 / 国际区域），领取平台活动 Credits，支持多账号按间隔定时自动领取 |
+| ZCode 套餐领取 | ZCode 账号凭据管理，领取套餐活动额度，支持多账号按间隔定时自动领取 |
+| 灵犀自动签到 | 金山灵犀多账号签到：一键导入本机客户端登录态（Windows）、默认官方签到接口、每日多时间点自动签到、抓包引导录入 |
 
 ## 支持的工具
 
@@ -85,6 +89,29 @@ CodeBuddy CLI 切换时会先关闭正在运行的 CLI，当前会话会中断�
 
 更多说明与独立版见 [Agent Companion 仓库](https://github.com/changexbc/agent-companion) · [在线演示](https://changexbc.github.io/agent-companion/)
 
+## 多平台标签页：TRAE / Qoder / ZCode / 灵犀
+
+应用顶部可在 WorkBuddy、TRAE、Qoder、ZCode、灵犀 五个平台间切换，各平台页面功能独立、互不影响。
+
+| 平台 | 主要能力 |
+| --- | --- |
+| WorkBuddy | 账号切换、会话复制、积分到期与用量统计（见上方功能表） |
+| TRAE | 多开实例管理（启动 / 聚焦 / 独立实例）、自动签到、积分与 JWT 凭据状态、冷却倒计时与清除、伪设备重置 |
+| Qoder | Token 凭据账号（`dt-*` / `pt-*`，区分国内 / 国际区域）、活动 Credits 领取 |
+| ZCode | Token 凭据账号（API Key / zcodejwttoken）、套餐活动额度领取 |
+| 灵犀 | Cookie 账号、一键导入本机灵犀客户端登录态（仅 Windows）、每日多时间点自动签到 |
+
+各平台签到 / 领取的共同能力：
+
+- **多账号管理**：启用开关、编辑凭据、删除账号、刷新状态、一键手动签到 / 领取；今日已成功的账号自动置灰为「今日已签到」
+- **定时自动执行**：TRAE 每日固定时刻（可配重试与账号间隔），Qoder / ZCode 按分钟间隔轮询，灵犀按每日多时间点（北京时间）；结果可发系统通知
+- **日志**：每平台独立的签到 / 领取日志，可随时清空
+
+补充说明：
+
+- TRAE 添加账号支持四种方式：桌面客户端导入、新开实例登录、扫描已有多开目录、手动录入 JWT（可附 refresh_token 到期前自动刷新）；「维护」中可一键清空全部账号的签到错误冷却（SessionDead 永久冷却除外）
+- 灵犀添加账号默认使用官方签到接口 `https://lingxi.kdocs.cn/api/public/v1/tasks/daily_check_in/claim`，可手动修改；从本机导入时会同时收集 `lingxi.wps.cn` 与 `lingxi.kdocs.cn` 两域登录 Cookie，多账号可在灵犀客户端切换登录后逐个导入；Cookie 过期后需重新抓包（弹窗内有 F12 抓包步骤）或再次导入
+
 ## 使用
 
 1. **添加与导出账号**：账号页 →「OAuth 扫码登录」「导入本机账号」「导入备份」；「导出」可将勾选账号备份为 JSON
@@ -93,7 +120,8 @@ CodeBuddy CLI 切换时会先关闭正在运行的 CLI，当前会话会中断�
 4. **切换各客户端账号**：CodeBuddy CLI、CodeBuddy IDE、VS Code CodeBuddy 插件均可在账号卡片一键切换；CodeBuddy IDE 与 VS Code 插件支持在弹窗中勾选复制当前账号的会话。CodeBuddy IDE 首次使用前需先手动打开并登录一次
 5. **开关各端入口**：设置 →「支持工具」可按客户端逐个开启 / 关闭入口；关闭后该端在账号页隐藏、不再轮询状态，不影响账号库。JetBrains 端默认关闭
 6. **自动轮换**：设置 → CodeBuddy CLI 自动轮换，开启后按积分紧迫程度自动设置默认账号
-7. **更新**：应用会自动检查公开 GitHub Releases；发现新版本后可在左下角直接升级，也可从设置页打开 Release 页面手动下载
+7. **多平台签到与领取**：顶部切换到 TRAE / Qoder / ZCode / 灵犀，添加账号后可一键签到 / 领取；各平台「设置」页配置自动执行时间（详见[多平台标签页](#多平台标签页trae--qoder--zcode--灵犀)）
+8. **更新**：应用会自动检查公开 GitHub Releases；发现新版本后可在左下角直接升级，也可从设置页打开 Release 页面手动下载
 
 ## 界面预览
 
