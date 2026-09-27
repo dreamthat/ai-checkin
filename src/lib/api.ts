@@ -1345,8 +1345,12 @@ export function zcodeGetNextRunTime(): Promise<string | null> {
 
 // ---------------------------------------------------------------------------
 // 灵犀签到子系统（金山 Lingxi）：11 个命令的 call 包装。
-// checkinUrl 与 Cookie 由用户从浏览器 F12 抓包手动获取，无本地凭据检测。
+// 签到接口默认官方地址（与 credit-core lingxi::DEFAULT_CHECKIN_URL 同步），
+// Cookie 由用户从浏览器 F12 抓包手动获取或从本机客户端导入。
 // ---------------------------------------------------------------------------
+
+/** 灵犀官方每日签到接口（添加账号/本机导入时的默认值，可在账号「编辑」中修改）。 */
+export const LINGXI_DEFAULT_CHECKIN_URL = "https://lingxi.kdocs.cn/api/public/v1/tasks/daily_check_in/claim";
 
 /** 灵犀账号列表。 */
 export function lingxiGetAccounts(): Promise<LingxiAccount[]> {

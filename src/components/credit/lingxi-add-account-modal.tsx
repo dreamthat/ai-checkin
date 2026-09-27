@@ -29,7 +29,8 @@ export function LingxiAddAccountModal({ open, onOpenChange }: LingxiAddAccountMo
   const refreshAccounts = useLingxiStore((s) => s.refreshAccounts);
 
   const [manualName, setManualName] = useState("");
-  const [manualUrl, setManualUrl] = useState("");
+  // 签到地址默认官方每日签到接口,可手动修改(抓包地址/活动地址)
+  const [manualUrl, setManualUrl] = useState(api.LINGXI_DEFAULT_CHECKIN_URL);
   const [manualCookie, setManualCookie] = useState("");
   const [importUrl, setImportUrl] = useState("");
   const [importing, setImporting] = useState(false);
@@ -109,6 +110,9 @@ export function LingxiAddAccountModal({ open, onOpenChange }: LingxiAddAccountMo
               onChange={(e) => setImportUrl(e.target.value)}
               placeholder="签到接口地址（留空则复用上方已填的 URL）"
             />
+            <p className="text-xs text-muted-foreground">
+              上方未填时将默认使用官方签到接口，可在账号「编辑」中修改。
+            </p>
             <Button
               variant="secondary"
               className="w-full"
@@ -134,7 +138,7 @@ export function LingxiAddAccountModal({ open, onOpenChange }: LingxiAddAccountMo
               id="lingxi-manual-url"
               value={manualUrl}
               onChange={(e) => setManualUrl(e.target.value)}
-              placeholder="POST https://…"
+              placeholder="默认官方签到接口，可改为抓包地址"
             />
           </div>
           <div className="space-y-2">

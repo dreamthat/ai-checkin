@@ -64,9 +64,12 @@ pub fn lingxi_add_account(
 ) -> AppResult<LingxiAccount> {
     let checkin_url = checkin_url.trim().to_string();
     let cookie = cookie.trim().to_string();
-    if checkin_url.is_empty() {
-        return Err(AppError::Credential("checkinUrl 不能为空".into()));
-    }
+    // checkinUrl 留空时落默认官方签到接口(前端弹窗已预填,此处兜底)
+    let checkin_url = if checkin_url.is_empty() {
+        credit_core::lingxi::DEFAULT_CHECKIN_URL.to_string()
+    } else {
+        checkin_url
+    };
     if cookie.is_empty() {
         return Err(AppError::Credential("cookie 不能为空".into()));
     }
@@ -122,7 +125,8 @@ pub async fn lingxi_import_local(
     name: Option<String>,
     state: State<'_, LingxiState>,
 ) -> AppResult<LingxiAccount> {
-    // checkinUrl 允许为空:core 会按灵犀主域(lingxi.wps.cn)匹配 Cookie,签到地址可后补
+    // checkinUrl 允许为空:core 按灵犀主域(lingxi.wps.cn)匹配 Cookie;
+    // 存储时空值落默认官方签到接口(cookie 匹配仍按空值语义走主域)
     let checkin_url = checkin_url.unwrap_or_default().trim().to_string();
     let url_for_import = checkin_url.clone();
     let imported = tokio::task::spawn_blocking(move || {
@@ -131,6 +135,11 @@ pub async fn lingxi_import_local(
     .await
     .map_err(|e| AppError::Credential(format!("导入任务失败: {e}")))?;
     let imported = imported?;
+    let checkin_url = if checkin_url.is_empty() {
+        credit_core::lingxi::DEFAULT_CHECKIN_URL.to_string()
+    } else {
+        checkin_url
+    };
 
     let name = {
         let trimmed = name.as_deref().unwrap_or("").trim();

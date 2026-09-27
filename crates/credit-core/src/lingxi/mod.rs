@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::models::{CreditSettings, PartialSettings};
 use crate::schedule;
 
+/// 灵犀官方每日签到接口(实测验证:POST 领取当日智点,响应含 task_key/reward_amount)。
+/// 添加账号时 checkinUrl 留空即用此默认值,仍可在账号卡片「编辑」中改为抓包地址。
+pub const DEFAULT_CHECKIN_URL: &str = "https://lingxi.kdocs.cn/api/public/v1/tasks/daily_check_in/claim";
+
 /// 灵犀账号(字段对齐前端卡片展示;checkinUrl / cookie 由用户抓包手动获取)。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

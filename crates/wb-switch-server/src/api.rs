@@ -2681,8 +2681,9 @@ async fn api_lingxi_accounts() -> Response {
 
 async fn api_lingxi_add_account(Json(body): Json<Value>) -> Response {
     let checkin_url = match body_str(&body, "checkinUrl") {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => return credit_missing("checkinUrl"),
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        // 留空落默认官方签到接口(与桌面端一致)
+        _ => credit_core::lingxi::DEFAULT_CHECKIN_URL.to_string(),
     };
     let cookie = match body_str(&body, "cookie") {
         Some(t) if !t.trim().is_empty() => t,
@@ -2692,7 +2693,7 @@ async fn api_lingxi_add_account(Json(body): Json<Value>) -> Response {
     let account = credit_core::lingxi::LingxiAccount {
         id: credit_core::store::generate_id(),
         name,
-        checkin_url: checkin_url.trim().into(),
+        checkin_url,
         cookie: cookie.trim().into(),
         created_at: config::now_ms(),
         enabled: body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
@@ -2732,7 +2733,8 @@ async fn api_lingxi_import_local(Json(body): Json<Value>) -> Response {
     };
     let account_url = body_str(&body, "checkinUrl")
         .map(|s| s.trim().to_string())
-        .unwrap_or_default(); // 空串合法(默认域导入),签到地址由用户后补
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| credit_core::lingxi::DEFAULT_CHECKIN_URL.to_string()); // 空串合法(默认域导入),存储落默认签到接口
     let name = match body_str(&body, "name").map(|s| s.trim().to_string()) {
         Some(n) if !n.is_empty() => n,
         _ => format!("灵犀-{}", imported.host),

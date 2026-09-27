@@ -24,6 +24,10 @@ const APP_DIR_NAME: &str = "WPS 灵犀";
 /// wps_sid 登录 cookie 在 .wps.cn 父域)。导入时未提供签到地址则按此域匹配 Cookie。
 pub const DEFAULT_LINGXI_HOST: &str = "lingxi.wps.cn";
 
+/// 网页版签到域(官方每日签到接口 lingxi.kdocs.cn,实测验证)。
+/// wps.cn 与 kdocs.cn 共用 WPS 账号体系,导入时两域 Cookie 一并收集。
+pub const KDOCS_SIGNIN_HOST: &str = "lingxi.kdocs.cn";
+
 /// 导入结果:拼好的 Cookie 请求头 + host + 有效 cookie 数。
 #[derive(Debug, Clone)]
 pub struct LingxiLocalImport {
@@ -210,9 +214,9 @@ fn sort_rows(rows: &mut [CookieRow]) {
     });
 }
 
-/// 查询并解密 Cookies SQLite 字节(已读入内存)中 host 匹配且未过期的 cookie,
+/// 查询并解密 Cookies SQLite 字节(已读入内存)中命中任一 host 且未过期的 cookie,
 /// 返回 "name=value; name=value" 形式的 Cookie 请求头。key 由调用方解出(便于单测)。
-fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8]) -> AppResult<String> {
+fn query_cookie_header(bytes: &[u8], hosts: &[String], now_unix_secs: i64, key: &[u8]) -> AppResult<String> {
     // 灵犀运行中可能持有文件锁:写唯一临时副本后只读打开(Windows 下 fs::read 以
     // FILE_SHARE_READ|WRITE|DELETE 打开,多数情况可直接读;失败由调用方提示退出客户端)。
     let tmp = std::env::temp_dir().join(format!(
@@ -253,7 +257,7 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
 
     let mut rows: Vec<CookieRow> = Vec::new();
     for (host_key, name, encrypted, plain, path, expires_utc) in raw_rows {
-        if name.is_empty() || !is_host_match(host, &host_key) {
+        if name.is_empty() || !hosts.iter().any(|h| is_host_match(h, &host_key)) {
             continue;
         }
         if is_cookie_expired(expires_utc, now_unix_secs) {
@@ -275,6 +279,10 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
         }
     }
     sort_rows(&mut rows);
+    // 双域合并(wps.cn 登录态 + kdocs.cn 签到域)后同名 cookie 会重复(如 wps_sid 同时
+    // 种在两个域):按 name 去重,保留排序最前的一条(host_key 精确度倒序 = 最具体域优先)。
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| seen.insert(r.name.clone()));
     Ok(rows
         .iter()
         .map(|r| format!("{}={}", r.name, r.value))
@@ -284,14 +292,22 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
 
 /// 从本机灵犀客户端导入当前登录态:读取 Cookies SQLite(临时副本),
 /// 解密出 host 匹配且未过期的 cookie,拼成 Cookie 请求头。
-/// checkin_url 为空时按灵犀主域(lingxi.wps.cn)匹配,签到地址可由用户后补。
+/// 匹配域为「签到 URL 域 + wps.cn 主域 + kdocs.cn 签到域」合并:客户端登录态
+/// (wps_sid)种在 .wps.cn,官方签到接口在 lingxi.kdocs.cn——只按 URL 单域匹配
+/// 会丢登录态,故三域一起收,同名 cookie 按最具体域保留。
 pub fn import_from_local(checkin_url: &str) -> AppResult<LingxiLocalImport> {
-    let host = if checkin_url.trim().is_empty() {
-        DEFAULT_LINGXI_HOST.to_string()
-    } else {
-        extract_host(checkin_url)
-            .ok_or_else(|| AppError::Credential("无法从 checkinUrl 解析主机名，请检查链接".into()))?
+    // 空值 → 默认主域;非空但解析失败 → 明确拒绝(粘贴错误应当场反馈,不静默降级)
+    let host = match checkin_url.trim() {
+        "" => DEFAULT_LINGXI_HOST.to_string(),
+        t => extract_host(t)
+            .ok_or_else(|| AppError::Credential("无法从 checkinUrl 解析主机名，请检查链接".into()))?,
     };
+    let mut hosts = vec![host.clone()];
+    for h in [DEFAULT_LINGXI_HOST, KDOCS_SIGNIN_HOST] {
+        if !hosts.iter().any(|x| x == h) {
+            hosts.push(h.to_string());
+        }
+    }
 
     let cookies_path = lingxi_data_dir().join("Network").join("Cookies");
     if !cookies_path.exists() {
@@ -308,11 +324,12 @@ pub fn import_from_local(checkin_url: &str) -> AppResult<LingxiLocalImport> {
     })?;
 
     let now_unix_secs = chrono::Utc::now().timestamp();
-    let cookie_header = query_cookie_header(&bytes, &host, now_unix_secs, &key)?;
+    let cookie_header = query_cookie_header(&bytes, &hosts, now_unix_secs, &key)?;
     let cookie_count = cookie_header.split("; ").filter(|s| !s.is_empty()).count();
     if cookie_count == 0 {
         return Err(AppError::Credential(format!(
-            "未在灵犀客户端找到 {host} 的登录 Cookie，请确认客户端当前已登录该站点"
+            "未在灵犀客户端找到 {} 的登录 Cookie，请确认客户端当前已登录该站点",
+            hosts.join(" / ")
         )));
     }
     Ok(LingxiLocalImport { cookie_header, host, cookie_count })
@@ -498,18 +515,40 @@ mod tests {
             ("lingxi.wps.cn", "", seal_v10(&key, b"noname"), "", "/", 0),
             ("lingxi.wps.cn", "corrupt", b"v10garbage-not-aes".to_vec(), "", "/", 0),
         ]);
-        let header = query_cookie_header(&bytes, "lingxi.wps.cn", now, &key).unwrap();
+        let header = query_cookie_header(&bytes, &["lingxi.wps.cn".to_string()], now, &key).unwrap();
         // host 匹配 + 过滤过期/无名/损坏 + 稳定排序(host_key 精确度倒序 → name);
-        // 加密与明文 value 列两种来源都采纳
+        // 加密与明文 value 列两种来源都采纳;同名 cookie 按最具体域去重(wps_sid 只留精确域)
         assert_eq!(
             header,
-            "wps_sid=sid-main; deep=rawval; wps_sid=plain-parent-sid",
+            "wps_sid=sid-main; deep=rawval",
             "实际: {header}"
         );
         // 零命中
         let empty = synth_cookies_db(&[("other.example.com", "wps_sid", seal_v10(&key, b"z"), "", "/", 0)]);
-        let header = query_cookie_header(&empty, "lingxi.wps.cn", now, &key).unwrap();
+        let header = query_cookie_header(&empty, &["lingxi.wps.cn".to_string()], now, &key).unwrap();
         assert_eq!(header, "");
+    }
+
+    #[test]
+    fn query_cookie_header_multi_host_merges_and_dedups() {
+        let key = [0x42u8; 32];
+        // 双域合并:登录态在 .wps.cn,签到域在 lingxi.kdocs.cn;
+        // 同名 wps_sid 两域都有时保留 host_key 最具体(lingxi.kdocs.cn)的一条
+        let bytes = synth_cookies_db(&[
+            (".wps.cn", "wps_sid", Vec::new(), "parent-wps-sid", "/", 0),
+            ("lingxi.kdocs.cn", "wps_sid", Vec::new(), "kdocs-sid", "/", 0),
+            (".kdocs.cn", "kp_token", Vec::new(), "kdocs-only", "/", 0),
+            (".wps.cn", "client_flag", Vec::new(), "wps-only", "/", 0),
+        ]);
+        let hosts = ["lingxi.kdocs.cn".to_string(), "lingxi.wps.cn".to_string()];
+        let header = query_cookie_header(&bytes, &hosts, 0, &key).unwrap();
+        // 排序按 host_key 精确度倒序:lingxi.kdocs.cn → .kdocs.cn/.wps.cn;
+        // 同名去重后 wps_sid 保留 kdocs 域那条(更贴近签到请求域)
+        assert_eq!(
+            header,
+            "wps_sid=kdocs-sid; kp_token=kdocs-only; client_flag=wps-only",
+            "实际: {header}"
+        );
     }
 
     #[test]
@@ -520,7 +559,7 @@ mod tests {
             ("lingxi.wps.cn", "wps_sid", b"v20app-bound-opaque".to_vec(), "", "/", 0),
             (".wps.cn", "sid", Vec::new(), "keep-plain", "/", 0),
         ]);
-        let header = query_cookie_header(&bytes, "lingxi.wps.cn", 0, &key).unwrap();
+        let header = query_cookie_header(&bytes, &["lingxi.wps.cn".to_string()], 0, &key).unwrap();
         assert_eq!(header, "sid=keep-plain", "实际: {header}");
     }
 }

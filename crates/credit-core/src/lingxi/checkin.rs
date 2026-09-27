@@ -79,13 +79,19 @@ pub async fn checkin_one(
     outcome
 }
 
+/// 生效的签到地址:存量兼容——默认地址上线前导入的账号 URL 为空 → 官方接口,无需手动补填。
+fn effective_checkin_url(account: &LingxiAccount) -> &str {
+    if account.checkin_url.trim().is_empty() {
+        super::DEFAULT_CHECKIN_URL
+    } else {
+        account.checkin_url.trim()
+    }
+}
+
 /// 协议请求与判定(不写状态):POST checkinUrl,headers 仅 UA + Cookie。
 async fn checkin_request(client: &reqwest::Client, account: &LingxiAccount) -> LingxiCheckinOutcome {
-    let url = account.checkin_url.trim();
+    let url = effective_checkin_url(account);
     let cookie = account.cookie.trim();
-    if url.is_empty() {
-        return LingxiCheckinOutcome { outcome: Outcome::Failed, message: "签到链接为空，请编辑账号补全".into() };
-    }
     if cookie.is_empty() {
         return LingxiCheckinOutcome { outcome: Outcome::Failed, message: "Cookie 为空，请编辑账号补全".into() };
     }
@@ -164,10 +170,21 @@ mod tests {
             ..Default::default()
         };
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        // 空 URL 走默认地址(fallback 纯函数验证,不发起网络请求)
+        assert_eq!(
+            effective_checkin_url(&empty_url),
+            crate::lingxi::DEFAULT_CHECKIN_URL
+        );
+        assert_eq!(
+            effective_checkin_url(&empty_cookie),
+            "https://example.com",
+            "非空 URL 原样生效"
+        );
         rt.block_on(async {
-            let o = checkin_request(&client, &empty_url).await;
+            // 不可达地址 → 请求失败(Failed);Cookie 为空 → 快速失败
+            let unreachable = LingxiAccount { checkin_url: "http://127.0.0.1:9/x".into(), ..empty_url.clone() };
+            let o = checkin_request(&client, &unreachable).await;
             assert_eq!(o.outcome, Outcome::Failed);
-            assert!(o.message.contains("签到链接为空"));
             let o = checkin_request(&client, &empty_cookie).await;
             assert_eq!(o.outcome, Outcome::Failed);
             assert!(o.message.contains("Cookie 为空"));
