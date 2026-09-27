@@ -85,8 +85,14 @@ pub fn build_account_views(state: &TraeState) -> Vec<PublicAccount> {
                     a.cooldown_reason =
                         if entry.reason.is_empty() { None } else { Some(entry.reason.clone()) };
                 }
-                // 今日签到
-                a.checked_today = Some(summary_today && checked_names.contains(&a.name));
+                // 今日签到:批次摘要(一键/定时签到写入)或账号自身最近一次成功签到
+                // (单账号「立即签到」不写摘要,按 lastCheckinAt/lastCheckinResult 回读判定;时区与 today_prefix 一致用本地时区)
+                let self_checked = matches!(a.last_checkin_result.as_deref(), Some("success"))
+                    && a.last_checkin_at
+                        .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
+                        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string() == today)
+                        .unwrap_or(false);
+                a.checked_today = Some((summary_today && checked_names.contains(&a.name)) || self_checked);
                 // 积分展示:优先 remaining_credits → credits_history → 既有值
                 if let Some(c) = rc.credits.get(uid) {
                     a.points = Some(*c as i64);
