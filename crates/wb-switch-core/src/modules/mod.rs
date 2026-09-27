@@ -4,11 +4,14 @@ pub mod checkin;
 pub mod codebuddy_cli;
 pub mod codebuddy_cn_ide;
 pub mod codebuddy_ide;
+pub mod codebuddy_ide_session;
+pub mod codebuddy_ide_session_sync;
 pub mod config;
 pub mod credit_usage;
 pub mod credits;
 pub mod error_log;
 pub mod export_import;
+pub mod jetbrains;
 pub mod limits;
 #[cfg(target_os = "linux")]
 pub mod linux_keyring;

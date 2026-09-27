@@ -4874,6 +4874,7 @@ dependencies = [
  "tauri-plugin",
  "tauri-plugin-notification",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5886,7 +5887,7 @@ dependencies = [
 
 [[package]]
 name = "wb-switch-core"
-version = "0.1.50"
+version = "0.1.53"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -5909,7 +5910,7 @@ dependencies = [
 
 [[package]]
 name = "wb-switch-rust"
-version = "0.1.50"
+version = "0.1.53"
 dependencies = [
  "chrono",
  "credit-core",
@@ -5938,7 +5939,7 @@ dependencies = [
 
 [[package]]
 name = "wb-switch-server"
-version = "0.1.50"
+version = "0.1.53"
 dependencies = [
  "axum",
  "chrono",
