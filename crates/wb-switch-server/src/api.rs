@@ -2512,11 +2512,10 @@ async fn api_lingxi_add_account(Json(body): Json<Value>) -> Response {
 /// DPAPI 解密 + SQLite 读取是阻塞 IO,放 blocking 线程(与 qoder import-local 同款);
 /// 相同 checkinUrl+Cookie 已存在则原样返回该账号(前端提示已导入)。
 async fn api_lingxi_import_local(Json(body): Json<Value>) -> Response {
-    let checkin_url = match body_str(&body, "checkinUrl") {
-        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => return credit_missing("checkinUrl"),
-    };
-    let url_for_import = checkin_url.clone();
+    // checkinUrl 允许为空:core 按灵犀主域(lingxi.wps.cn)匹配 Cookie,签到地址可后补
+    let url_for_import = body_str(&body, "checkinUrl")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let imported = match tokio::task::spawn_blocking(move || {
         credit_core::lingxi::local_import::import_from_local(&url_for_import)
     })
@@ -2529,6 +2528,9 @@ async fn api_lingxi_import_local(Json(body): Json<Value>) -> Response {
         Ok(v) => v,
         Err(e) => return json_err(e.to_string(), StatusCode::BAD_REQUEST),
     };
+    let account_url = body_str(&body, "checkinUrl")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default(); // 空串合法(默认域导入),签到地址由用户后补
     let name = match body_str(&body, "name").map(|s| s.trim().to_string()) {
         Some(n) if !n.is_empty() => n,
         _ => format!("灵犀-{}", imported.host),
@@ -2539,14 +2541,14 @@ async fn api_lingxi_import_local(Json(body): Json<Value>) -> Response {
         if let Some(existing) = data
             .get_accounts()
             .iter()
-            .find(|a| a.checkin_url == checkin_url && a.cookie == imported.cookie_header)
+            .find(|a| a.checkin_url == account_url && a.cookie == imported.cookie_header)
         {
             return json_ok(serde_json::to_value(existing).unwrap_or(json!(null)));
         }
         let account = credit_core::lingxi::LingxiAccount {
             id: credit_core::store::generate_id(),
             name,
-            checkin_url,
+            checkin_url: account_url,
             cookie: imported.cookie_header,
             created_at: config::now_ms(),
             enabled: true,

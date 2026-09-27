@@ -36,19 +36,20 @@ export function LingxiAddAccountModal({ open, onOpenChange }: LingxiAddAccountMo
   const [adding, setAdding] = useState(false);
 
   async function handleImportLocal() {
-    // 导入地址:优先用导入区块的输入,留空则复用上方已填的签到 URL
-    const checkinUrl = (importUrl || manualUrl).trim();
-    if (!checkinUrl) {
-      toast.error("请先填写签到接口地址（checkinUrl）");
-      return;
-    }
+    // 导入地址:优先用导入区块的输入,留空则复用上方已填的签到 URL;
+    // 两者都空时后端按灵犀主域(lingxi.wps.cn)匹配 Cookie,签到地址可后补
     if (importing) return;
     setImporting(true);
     try {
+      const checkinUrl = (importUrl || manualUrl).trim();
       const account = await api.lingxiImportLocal(checkinUrl);
       const existed = accounts.some((a) => a.id === account.id);
       toast.success(existed ? "该登录态已导入过" : "导入成功", {
-        description: existed ? account.name : `已添加账号：${account.name}`,
+        description: existed
+          ? account.name
+          : checkinUrl
+            ? `已添加账号：${account.name}`
+            : `已添加账号：${account.name}（未填签到地址，签到前请在账号卡片中补填）`,
       });
       await refreshAccounts();
       setImportUrl("");

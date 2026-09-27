@@ -20,6 +20,10 @@ use crate::error::{AppError, AppResult};
 /// 灵犀客户端 userData 目录名(%APPDATA% 下,带空格)。
 const APP_DIR_NAME: &str = "WPS 灵犀";
 
+/// 灵犀 web 端主域(客户端 app.asar 已验证活动页在 lingxi.wps.cn;
+/// wps_sid 登录 cookie 在 .wps.cn 父域)。导入时未提供签到地址则按此域匹配 Cookie。
+pub const DEFAULT_LINGXI_HOST: &str = "lingxi.wps.cn";
+
 /// 导入结果:拼好的 Cookie 请求头 + host + 有效 cookie 数。
 #[derive(Debug, Clone)]
 pub struct LingxiLocalImport {
@@ -80,13 +84,18 @@ pub fn is_host_match(host: &str, host_key: &str) -> bool {
     hk == host
 }
 
-/// Chromium expires_utc(1601-01-01 起 100ns)是否已过期(纯函数)。
-/// <=0 为会话 cookie,永不过期;换算 Unix 秒后 <= now 视为过期(RFC 6265 口径)。
+/// Chromium expires_utc 是否已过期(纯函数)。<=0 为会话 cookie,永不过期。
+/// 实测(本机灵犀,新版 Chromium):时间戳单位为**微秒**(μs);旧版 Chrome 为 100ns。
+/// 两者以 1e17 为界区分(2026 年 μs 值 ≈1.34e16,100ns 值 ≈1.34e17,分界 2286 年,无实际重叠)。
 pub fn is_cookie_expired(expires_utc: i64, now_unix_secs: i64) -> bool {
     if expires_utc <= 0 {
         return false;
     }
-    let unix_secs = expires_utc / 10_000_000 - 11_644_473_600;
+    let unix_secs = if expires_utc >= 100_000_000_000_000_000 {
+        expires_utc / 10_000_000 - 11_644_473_600 // 100ns(旧 Chromium)
+    } else {
+        expires_utc / 1_000_000 - 11_644_473_600 // μs(新版 Chromium,灵犀实测)
+    };
     unix_secs <= now_unix_secs
 }
 
@@ -185,6 +194,9 @@ struct CookieRow {
     expires_utc: i64,
 }
 
+/// 单行查询结果(host_key, name, encrypted_value, 明文 value, path, expires_utc)。
+type RawRow = (String, String, Vec<u8>, String, String, i64);
+
 /// 输出排序(确定性):host_key 精确度倒序 → name 字典序 → path 长度倒序 → path 字典序。
 fn sort_rows(rows: &mut [CookieRow]) {
     rows.sort_by(|a, b| {
@@ -208,12 +220,12 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
         uuid::Uuid::new_v4()
     ));
     std::fs::write(&tmp, bytes)?;
-    let rows = (|| -> AppResult<Vec<(String, String, Vec<u8>, String, i64)>> {
+    let rows = (|| -> AppResult<Vec<RawRow>> {
         let conn = rusqlite::Connection::open_with_flags(&tmp, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| AppError::Credential(format!("打开 Cookies 数据库失败: {e}")))?;
         let mut stmt = conn
             .prepare(
-                "SELECT host_key, name, encrypted_value, path, expires_utc FROM cookies",
+                "SELECT host_key, name, encrypted_value, value, path, expires_utc FROM cookies",
             )
             .map_err(|e| AppError::Credential(format!("Cookies 数据库缺少 cookies 表: {e}")))?;
         let raw = stmt
@@ -223,15 +235,16 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|e| AppError::Credential(format!("读取 Cookies 数据库失败: {e}")))?;
         let mut collected = Vec::new();
         for r in raw {
-            let (host_key, name, encrypted, path, expires_utc) =
+            let (host_key, name, encrypted, plain, path, expires_utc) =
                 r.map_err(|e| AppError::Credential(format!("读取 Cookies 行失败: {e}")))?;
-            collected.push((host_key, name, encrypted, path, expires_utc));
+            collected.push((host_key, name, encrypted, plain, path, expires_utc));
         }
         Ok(collected)
     })();
@@ -239,23 +252,23 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
     let raw_rows = rows?;
 
     let mut rows: Vec<CookieRow> = Vec::new();
-    for (host_key, name, encrypted, path, expires_utc) in raw_rows {
+    for (host_key, name, encrypted, plain, path, expires_utc) in raw_rows {
         if name.is_empty() || !is_host_match(host, &host_key) {
             continue;
         }
         if is_cookie_expired(expires_utc, now_unix_secs) {
             continue;
         }
-        if encrypted.is_empty() {
-            continue;
-        }
-        // v20(App-Bound)加密整批直接报明确错误;其余单条解密失败跳过,不拖垮导入
-        if encrypted.starts_with(b"v20") {
-            return Err(AppError::Credential(
-                "灵犀 Cookie 为 v20(App-Bound)加密格式，暂不支持".into(),
-            ));
-        }
-        if let Ok(value) = decrypt_cookie_value(&key, &encrypted) {
+        // 实测(本机灵犀):登录核心 wps_sid 可能以明文存于 value 列(encrypted_value 为空);
+        // 其余 cookie 为 v10 加密。两种来源都采纳。
+        let resolved = if !encrypted.is_empty() {
+            decrypt_cookie_value(&key, &encrypted).ok()
+        } else if !plain.is_empty() {
+            Some(plain)
+        } else {
+            None
+        };
+        if let Some(value) = resolved {
             if !value.is_empty() {
                 rows.push(CookieRow { host_key, name, value, path, expires_utc });
             }
@@ -271,9 +284,14 @@ fn query_cookie_header(bytes: &[u8], host: &str, now_unix_secs: i64, key: &[u8])
 
 /// 从本机灵犀客户端导入当前登录态:读取 Cookies SQLite(临时副本),
 /// 解密出 host 匹配且未过期的 cookie,拼成 Cookie 请求头。
+/// checkin_url 为空时按灵犀主域(lingxi.wps.cn)匹配,签到地址可由用户后补。
 pub fn import_from_local(checkin_url: &str) -> AppResult<LingxiLocalImport> {
-    let host = extract_host(checkin_url)
-        .ok_or_else(|| AppError::Credential("无法从 checkinUrl 解析主机名，请检查链接".into()))?;
+    let host = if checkin_url.trim().is_empty() {
+        DEFAULT_LINGXI_HOST.to_string()
+    } else {
+        extract_host(checkin_url)
+            .ok_or_else(|| AppError::Credential("无法从 checkinUrl 解析主机名，请检查链接".into()))?
+    };
 
     let cookies_path = lingxi_data_dir().join("Network").join("Cookies");
     if !cookies_path.exists() {
@@ -341,11 +359,17 @@ mod tests {
         // 会话 cookie(expires_utc=0)保留
         assert!(!is_cookie_expired(0, 1_000_000_000));
         assert!(!is_cookie_expired(-5, 1_000_000_000));
-        // 恰好等于当前秒 → 过期(RFC 6265 口径)
+        // 100ns 单位(旧 Chromium):恰好等于当前秒 → 过期(RFC 6265 口径)
         let expiry_chromium = (1_000_000_020 + 11_644_473_600) * 10_000_000;
         assert!(!is_cookie_expired(expiry_chromium, 1_000_000_010), "未来未过期");
         assert!(is_cookie_expired(expiry_chromium, 1_000_000_020), "到期秒视为过期");
         assert!(is_cookie_expired(expiry_chromium, 1_000_000_030), "已过视为过期");
+        // μs 单位(新版 Chromium/灵犀实测形态):同一时刻数值小 10 倍
+        let expiry_micros = (1_000_000_020 + 11_644_473_600) * 1_000_000;
+        assert!(!is_cookie_expired(expiry_micros, 1_000_000_010), "μs 未来未过期");
+        assert!(is_cookie_expired(expiry_micros, 1_000_000_020), "μs 到期视为过期");
+        // 灵犀实测值量级(13463072372545615 μs ≈ 2027 年)不得被判过期
+        assert!(!is_cookie_expired(13_463_072_372_545_615, 1_790_000_000));
     }
 
     #[test]
@@ -418,10 +442,8 @@ mod tests {
 
     #[test]
     fn import_from_local_rejects_bad_url() {
-        // 无效 URL → host 解析失败(纯逻辑,不依赖本机环境)
+        // 无效 URL → host 解析失败(纯逻辑,不依赖本机环境);空串走默认域不再报错
         let err = import_from_local("::::").unwrap_err().to_string();
-        assert!(err.contains("主机名"), "实际: {err}");
-        let err = import_from_local("").unwrap_err().to_string();
         assert!(err.contains("主机名"), "实际: {err}");
     }
 
@@ -439,18 +461,19 @@ mod tests {
     }
 
     /// 造一个 Chromium 形态的 Cookies 库(最小列集)并返回文件字节。
-    fn synth_cookies_db(rows: &[(&str, &str, Vec<u8>, &str, i64)]) -> Vec<u8> {
+    /// 行结构: (host_key, name, encrypted_value, 明文 value, path, expires_utc)。
+    fn synth_cookies_db(rows: &[(&str, &str, Vec<u8>, &str, &str, i64)]) -> Vec<u8> {
         let path = std::env::temp_dir().join(format!("wb-test-cookies-{}.db", uuid::Uuid::new_v4()));
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute(
-            "CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB, path TEXT, is_secure INTEGER, is_httponly INTEGER, expires_utc INTEGER)",
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB, value TEXT, path TEXT, is_secure INTEGER, is_httponly INTEGER, expires_utc INTEGER)",
             [],
         )
         .unwrap();
-        for (host_key, name, encrypted, path, expires_utc) in rows {
+        for (host_key, name, encrypted, plain, path, expires_utc) in rows {
             conn.execute(
-                "INSERT INTO cookies VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
-                rusqlite::params![host_key, name, encrypted, path, expires_utc],
+                "INSERT INTO cookies VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)",
+                rusqlite::params![host_key, name, encrypted, plain, path, expires_utc],
             )
             .unwrap();
         }
@@ -467,34 +490,38 @@ mod tests {
         let future = (now + 3600 + 11_644_473_600) * 10_000_000;
         let past = (now - 3600 + 11_644_473_600) * 10_000_000;
         let bytes = synth_cookies_db(&[
-            ("lingxi.wps.cn", "wps_sid", seal_v10(&key, b"sid-main"), "/", 0),
-            (".wps.cn", "common", seal_v10(&key, b"parent-val"), "/", future),
-            ("lingxi.wps.cn", "gone", seal_v10(&key, b"expired"), "/", past),
-            ("other.example.com", "wps_sid", seal_v10(&key, b"zzz"), "/", 0),
-            (".wps.cn", "deep", b"rawval".to_vec(), "/a/b", 0),
-            ("lingxi.wps.cn", "", seal_v10(&key, b"noname"), "/", 0),
-            ("lingxi.wps.cn", "corrupt", b"v10garbage-not-aes".to_vec(), "/", 0),
+            ("lingxi.wps.cn", "wps_sid", seal_v10(&key, b"sid-main"), "", "/", 0),
+            // 实测形态:.wps.cn 父域的 wps_sid 以明文存 value 列
+            (".wps.cn", "wps_sid", Vec::new(), "plain-parent-sid", "/", future),
+            ("lingxi.wps.cn", "gone", seal_v10(&key, b"expired"), "", "/", past),
+            ("other.example.com", "wps_sid", seal_v10(&key, b"zzz"), "", "/", 0),
+            (".wps.cn", "deep", b"rawval".to_vec(), "", "/a/b", 0),
+            ("lingxi.wps.cn", "", seal_v10(&key, b"noname"), "", "/", 0),
+            ("lingxi.wps.cn", "corrupt", b"v10garbage-not-aes".to_vec(), "", "/", 0),
         ]);
         let header = query_cookie_header(&bytes, "lingxi.wps.cn", now, &key).unwrap();
-        // host 匹配 + 过滤过期/无名/损坏 + 稳定排序(host_key 精确度倒序 → name)
-        assert_eq!(header, "wps_sid=sid-main; common=parent-val; deep=rawval", "实际: {header}");
+        // host 匹配 + 过滤过期/无名/损坏 + 稳定排序(host_key 精确度倒序 → name);
+        // 加密与明文 value 列两种来源都采纳
+        assert_eq!(
+            header,
+            "wps_sid=sid-main; deep=rawval; wps_sid=plain-parent-sid",
+            "实际: {header}"
+        );
         // 零命中
-        let empty = synth_cookies_db(&[("other.example.com", "wps_sid", seal_v10(&key, b"z"), "/", 0)]);
+        let empty = synth_cookies_db(&[("other.example.com", "wps_sid", seal_v10(&key, b"z"), "", "/", 0)]);
         let header = query_cookie_header(&empty, "lingxi.wps.cn", now, &key).unwrap();
         assert_eq!(header, "");
     }
 
     #[test]
-    fn query_cookie_header_rejects_v20() {
+    fn query_cookie_header_skips_v20() {
         let key = [0x42u8; 32];
-        let bytes = synth_cookies_db(&[(
-            "lingxi.wps.cn",
-            "wps_sid",
-            b"v20app-bound-opaque".to_vec(),
-            "/",
-            0,
-        )]);
-        let err = query_cookie_header(&bytes, "lingxi.wps.cn", 0, &key).unwrap_err().to_string();
-        assert!(err.contains("暂不支持") && err.contains("v20"), "实际: {err}");
+        // v20 单条被跳过(不整批失败);同批的明文 value 仍可用
+        let bytes = synth_cookies_db(&[
+            ("lingxi.wps.cn", "wps_sid", b"v20app-bound-opaque".to_vec(), "", "/", 0),
+            (".wps.cn", "sid", Vec::new(), "keep-plain", "/", 0),
+        ]);
+        let header = query_cookie_header(&bytes, "lingxi.wps.cn", 0, &key).unwrap();
+        assert_eq!(header, "sid=keep-plain", "实际: {header}");
     }
 }

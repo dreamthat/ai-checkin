@@ -128,10 +128,8 @@ pub async fn lingxi_import_local(
     body: LingxiImportLocalBody,
     state: State<'_, LingxiState>,
 ) -> AppResult<LingxiAccount> {
+    // checkinUrl 允许为空:core 会按灵犀主域(lingxi.wps.cn)匹配 Cookie,签到地址可后补
     let checkin_url = body.checkin_url.trim().to_string();
-    if checkin_url.is_empty() {
-        return Err(AppError::Credential("checkinUrl 不能为空".into()));
-    }
     let url_for_import = checkin_url.clone();
     let imported = tokio::task::spawn_blocking(move || {
         credit_core::lingxi::local_import::import_from_local(&url_for_import)
