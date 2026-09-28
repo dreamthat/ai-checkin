@@ -1,10 +1,10 @@
-//! workbuddy-switch CLI：npm 安装形态的入口。
+//! ai-checkin CLI：npm 安装形态的入口。
 //!
 //! ```bash
-//! workbuddy-switch              # 启动本地服务 + 打开浏览器 webui
-//! workbuddy-switch serve        # 只起服务不开浏览器（--port / --no-open）
-//! workbuddy-switch status       # 终端输出当前账号
-//! workbuddy-switch version      # 版本号
+//! ai-checkin              # 启动本地服务 + 打开浏览器 webui
+//! ai-checkin serve        # 只起服务不开浏览器（--port / --host / --no-open）
+//! ai-checkin status       # 终端输出当前账号
+//! ai-checkin version      # 版本号
 //! ```
 
 mod api;
@@ -119,7 +119,7 @@ fn print_status(variant: WbVariant) {
         })
     });
     let running = process::is_workbuddy_running(variant);
-    println!("workbuddy-switch v{}", update::APP_VERSION);
+    println!("ai-checkin v{}", update::APP_VERSION);
     println!("WorkBuddy 运行中: {}", if running { "是" } else { "否" });
     match current {
         Some(c) => {
@@ -142,7 +142,7 @@ async fn main() {
     match cmd {
         "status" => print_status(variant_arg(&args)),
         "version" | "--version" | "-V" => {
-            println!("workbuddy-switch {}", env!("CARGO_PKG_VERSION"));
+            println!("ai-checkin {}", env!("CARGO_PKG_VERSION"));
         }
         _ => serve(&args).await,
     }
@@ -155,18 +155,25 @@ async fn serve(args: &[String]) {
             port = p;
         }
     }
+    // 默认只绑本机;容器/局域网部署用 --host 0.0.0.0 放开
+    let mut host = "127.0.0.1".to_string();
+    if let Some(i) = args.iter().position(|a| a == "--host") {
+        if let Some(h) = args.get(i + 1).filter(|h| !h.is_empty()) {
+            host = h.clone();
+        }
+    }
 
     let app = api::router();
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("启动失败: 端口 {port} 被占用或不可用（{e}）。可用 --port 指定其他端口。");
+            eprintln!("启动失败: 地址 {addr} 被占用或不可用（{e}）。可用 --host / --port 调整。");
             std::process::exit(1);
         }
     };
 
-    println!("workbuddy-switch v{}", update::APP_VERSION);
+    println!("ai-checkin v{}", update::APP_VERSION);
     println!("webui: http://{addr}");
     println!("按 Ctrl+C 停止服务。");
 

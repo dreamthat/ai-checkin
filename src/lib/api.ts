@@ -75,9 +75,14 @@ import { screenshotDemoResponse } from "./screenshot-demo";
 /**
  * 双通道适配层：
  * - 桌面 App（Tauri）：`invoke` 调用 Rust commands
- * - webui（浏览器）：HTTP fetch 调用本地 workbuddy-switch 服务（127.0.0.1）
+ * - webui（浏览器）：HTTP fetch 调用本地 ai-checkin 服务（同源相对路径）
  */
-const API_BASE = "http://127.0.0.1:57890";
+/**
+ * webui 模式下前端与 API 同源部署（server 同端口托管 dist），用相对路径——
+ * 兼容 localhost / 127.0.0.1 / 局域网 IP / 反代等各种访问方式；服务器无 CORS 头，
+ * 任何跨源绝对地址都会被浏览器拦截。
+ */
+const API_BASE = "";
 
 const DEMO_READ_COMMANDS = new Set([
   "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_codebuddy_ide_status", "get_vscode_ext_status", "get_jetbrains_status", "list_vscode_sessions", "list_codebuddy_ide_sessions", "list_codebuddy_intl_ide_sessions", "vscode_session_links_preview", "codebuddy_ide_session_links_preview", "codebuddy_intl_ide_session_links_preview", "get_checkin_status",
@@ -307,7 +312,7 @@ async function httpCall<T>(cmd: string, args?: Record<string, unknown>): Promise
       body: route.method === "POST" ? JSON.stringify(args ?? {}) : undefined,
     });
   } catch {
-    throw new Error(`无法连接 workbuddy-switch 服务（${API_BASE}），请先运行 \`workbuddy-switch\``);
+    throw new Error(`无法连接 ai-checkin 服务，请确认服务已启动（webui 与接口同源：${window.location.origin}）`);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

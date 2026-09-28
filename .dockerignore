@@ -1,0 +1,13 @@
+# 构建上下文瘦身：产物与版本库不进镜像
+.git
+.trae
+.github
+docs
+target
+**/target
+node_modules
+**/node_modules
+dist
+*.tgz
+npm/platform/*/bin/
+npm/platform/*/package-lock.json
