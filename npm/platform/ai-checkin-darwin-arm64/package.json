@@ -1,7 +1,7 @@
 {
-  "name": "workbuddy-switch-darwin-arm64",
+  "name": "ai-checkin-darwin-arm64",
   "version": "0.1.53",
-  "description": "workbuddy-switch platform binary (darwin-arm64)",
+  "description": "ai-checkin platform binary (darwin-arm64)",
   "os": [
     "darwin"
   ],

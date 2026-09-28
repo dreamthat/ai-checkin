@@ -1,6 +1,6 @@
-# workbuddy-switch
+# ai-checkin
 
-WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code CodeBuddy 插件账号切换工具，浏览器中操作（webui），四者均支持国内版 / 国际版，并提供积分到期与 Token 用量监控。同时提供桌面 App（Tauri）版本。
+AI 编程工具多合一账号管理与自动签到（WorkBuddy / CodeBuddy / TRAE / Qoder / ZCode / 灵犀），浏览器中操作（webui），提供账号切换、积分到期与 Token 用量监控、多平台定时签到与额度领取。同时提供桌面 App（Tauri）版本。
 
 多账号共享登录态，一键切换 WorkBuddy 登录账号。**会话复制**：把当前账号的会话以新 id 复制给目标账号，源账号数据不受影响，云端归属目标账号。
 
@@ -11,9 +11,9 @@ WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code CodeBuddy 插件账号切�
 ### npm 安装（webui）
 
 ```bash
-npm i -g workbuddy-switch
-workbuddy-switch              # 启动本地服务 + 自动打开浏览器
-workbuddy-switch status       # 终端查看当前账号
+npm i -g ai-checkin
+ai-checkin                    # 启动本地服务 + 自动打开浏览器
+ai-checkin status             # 终端查看当前账号
 ```
 
 webui 界面与桌面 App 一致，功能覆盖下方全部模块。
@@ -55,7 +55,7 @@ webui 界面与桌面 App 一致，功能覆盖下方全部模块。
 3. **查看积分与统计**：账号页自动查询各账号积分到期情况，点「刷新积分」手动更新；侧栏进入「积分统计」「Token 统计」查看用量明细
 4. **切换各客户端账号**：CodeBuddy CLI、CodeBuddy IDE、VS Code CodeBuddy 插件均可在账号卡片一键切换；其中 VS Code 插件支持在弹窗中勾选复制当前账号的会话。CodeBuddy IDE 首次使用前需先手动打开并登录一次
 5. **自动轮换**：设置 → CodeBuddy CLI 自动轮换，开启后按积分紧迫程度自动设置默认账号
-6. **更新**：设置 → 自动更新可检查公开 GitHub Releases 源；npm 版本也可通过 `npm update -g workbuddy-switch` 升级
+6. **更新**：设置 → 自动更新可检查公开 GitHub Releases 源；npm 版本也可通过 `npm update -g ai-checkin` 升级
 
 ## macOS 权限说明
 

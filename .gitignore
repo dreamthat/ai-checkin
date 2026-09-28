@@ -55,3 +55,6 @@ npm/platform/*/bin/
 .grok/
 /.workbuddy/
 /AGENTS.md
+
+npm/*.tgz
+npm/platform/*/*.tgz

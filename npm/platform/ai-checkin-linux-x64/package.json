@@ -1,0 +1,15 @@
+{
+  "name": "ai-checkin-linux-x64",
+  "version": "0.1.53",
+  "description": "ai-checkin platform binary (linux-x64)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "license": "MIT"
+}

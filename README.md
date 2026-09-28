@@ -154,9 +154,9 @@ Token 统计页按来源展示 Token 总览与趋势、构成占比、活跃热�
 ## npm / webui 版本
 
 ```bash
-npm i -g workbuddy-switch
-workbuddy-switch              # 启动本地服务 + 自动打开浏览器
-workbuddy-switch status       # 终端查看当前账号
+npm i -g ai-checkin
+ai-checkin                    # 启动本地服务 + 自动打开浏览器
+ai-checkin status             # 终端查看当前账号
 ```
 
 界面与桌面 App 一致，功能覆盖上方全部模块，但不提供会话悬浮窗（桌面版专属）。webui 模式下的 macOS 权限由启动服务的终端进程决定；若终端已授权完全磁盘访问则无需额外操作。
