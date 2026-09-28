@@ -65,7 +65,11 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
             "companion-toggle" => crate::companion::toggle_rail(app),
             "companion-settings" => crate::companion::open_settings_from_tray(app),
             "quit-app" => app.exit(0),
+            // TRAE 托盘分组仅 Windows 存在（trae_menu_items 是 cfg(windows)），
+            // 对应处理函数也 cfg(windows)：macOS/Linux 下这两条臂不编译
+            #[cfg(windows)]
             id if id.starts_with("trae_tray_account_") => on_trae_account_click(app, id),
+            #[cfg(windows)]
             "trae_tray_checkin" => start_trae_checkin_all(app),
             _ => {}
         })
